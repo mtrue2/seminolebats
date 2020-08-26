@@ -1,1 +1,5 @@
-seminole bats!
+This GitHub repo serves to compliment the manuscript "Forecasting the Distribution of a Range-Expanding Bat Reveals Future Response to Climate Change and Habitat" for submission to Acta Chiropterologica (in review). Within, you will find two .Rmd files which contain all R code used to produce the methods, analysis, and figures in the manuscript. "datawrangle.Rmd" concerns manipulating/filtering occurrence records and creating/calculating raster layers to be used in MaxEnt. "analysis" includes creating MaxEnt models, model selection, calculations in the results, and producing figures
+
+For purposes of confidentiality, we do not provide the raw GPS occurrence record .csvs. I can provide a csv that contains county IDs of presences and background for purposes of replication upon request
+
+Any questions or concerns may be directed to the first author at mtrue@vt.edu
