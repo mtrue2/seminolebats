@@ -1,0 +1,1124 @@
+---
+title: "analysis"
+author: "MTrue"
+date: "5/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ENMeval)
+library(dplyr)
+library(scales)
+library(adehabitatHR)
+library(spatialEco)
+library(sp)
+library(ggplot2)
+library(ggspatial)
+library(ntbox)
+library(progress)
+library(raster)
+library(ggpubr)
+library(devtools)
+library(rmaxent)
+library(extrafont)
+library(ggsn)
+loadfonts(device = "win")
+```
+
+```{r}
+# bring in predictor (p) sets and make sure the crs is set
+p1985 <- list.files("./predictors/p1985", full.names = T)
+p1985 <- stack(p1985)
+crs(p1985) <- crs
+p2020 <- list.files("./predictors/p2020", full.names = T)
+p2020 <- stack(p2020)
+crs(p2020) <- crs
+p2040ssp2 <- list.files("./predictors/p2040/ssp2", full.names = T)
+p2040ssp2 <- stack(p2040ssp2)
+crs(p2040ssp2) <- crs
+p2040ssp3 <- list.files("./predictors/p2040/ssp3", full.names = T)
+p2040ssp3 <- stack(p2040ssp3)
+crs(p2040ssp3) <- crs
+p2040ssp5 <- list.files("./predictors/p2040/ssp5", full.names = T)
+p2040ssp5 <- stack(p2040ssp5)
+crs(p2040ssp5) <- crs
+p2060ssp2 <- list.files("./predictors/p2060/ssp2", full.names = T)
+p2060ssp2 <- stack(p2060ssp2)
+crs(p2060ssp2) <- crs
+p2060ssp3 <- list.files("./predictors/p2060/ssp3", full.names = T)
+p2060ssp3 <- stack(p2060ssp3)
+crs(p2060ssp3) <- crs
+p2060ssp5 <- list.files("./predictors/p2060/ssp5", full.names = T)
+p2060ssp5 <- stack(p2060ssp5)
+crs(p2060ssp5) <- crs
+p2080ssp2 <- list.files("./predictors/p2080/ssp2", full.names = T)
+p2080ssp2 <- stack(p2080ssp2)
+crs(p2080ssp2) <- crs
+p2080ssp3 <- list.files("./predictors/p2080/ssp3", full.names = T)
+p2080ssp3 <- stack(p2080ssp3)
+crs(p2080ssp3) <- crs
+p2080ssp5 <- list.files("./predictors/p2080/ssp5", full.names = T)
+p2080ssp5 <- stack(p2080ssp5)
+crs(p2080ssp5) <- crs
+```
+
+```{r}
+# bring in occurrence records and set up opposite/diagonal train/test blocks
+occur <- list.files("./data", full.names = T) %>%
+  lapply(read.csv)
+
+abs1985 <- occur[[1]]
+abs2020 <- occur[[2]]
+occur1985 <- occur[[3]]
+occur2020 <- occur[[4]]
+
+set.seed(21)
+block1985 <- get.block(occur1985, abs1985)
+block1985$occ.grp[block1985$occ.grp == 4] <- 1
+block1985$occ.grp[block1985$occ.grp == 3] <- 2
+block1985$bg.grp[block1985$bg.grp ==4] <- 1
+block1985$bg.grp[block1985$bg.grp ==3] <- 2
+
+# visualization of train/testing groups
+plot(occur1985, col = block1985$occ.grp)
+plot(state, add = T)
+plot(abs1985, col = block1985$bg.grp)
+plot(state, add = T)
+
+ggplot() +
+  layer_spatial(data = SpatialPoints(occur1985, crs), aes(color = as.factor(block1985$occ.grp))) +
+  layer_spatial(data = state, alpha = 0.0001) + theme_minimal()
+
+ggplot() +
+  layer_spatial(data = state) + theme_minimal() +
+  layer_spatial(data = SpatialPoints(occur2020, crs))
+
+
+```
+
+```{r}
+# check correlation matrices (set 1 will be all variables, set 2 with reduced variables retaining pearson < 0.85 for the training set (1935-1984))
+
+cormat <- layerStats(p1985, "pearson", na.rm = T)
+cormat$`pearson correlation coefficient`
+
+# tmin conflicts with tmean, tmax, nummonth4 (ie > 0.85), so we reduced to just retain tmin, prec, seasonality, and pforest
+
+```
+
+```{r}
+# set up ENMeval run -- this will create Maxent models for each pair of regularization multiplier and feature combinations
+
+rm <- c(0.1, 0.5, 0.75, 1:10, 12) # set which regularization multipliers to use
+
+p1985evalset1 <- ENMevaluate(occ = occur1985, env = p1985, bg.coords = abs1985, occ.grp = block1985$occ.grp, bg.grp = block1985$bg.grp, RMvalues = rm, fc = c("L", "LQ", "H", "LQH", "LQHP", "LQHPT"), algorithm = "maxent.jar", method = "user")
+
+
+names(p1985) # so we want 2,3,4, and 7 (pforest, prec, season, tmin)
+p1985evalset2 <- ENMevaluate(occ = occur1985, env = raster::subset(p1985, c(2:4, 7)), bg.coords = abs1985, occ.grp = block1985$occ.grp, bg.grp = block1985$bg.grp, RMvalues = rm, fc = c("L", "LQ", "H", "LQH", "LQHP", "LQHPT"), algorithm = "maxent.jar", method = "user")
+
+# make selection based on above 0.9 AUC, avg.test.or10pct, avg.test.orMTP, avg.diff.AUC
+# final selection lowest AICc
+
+# make reference to which model is what
+p1985evalset1@results$mod.number <- 1:length(p1985evalset1@results$settings)
+p1985evalset2@results$mod.number <- 1:length(p1985evalset2@results$settings)
+
+p1985evalset1@results$predictors <- "set1"
+p1985evalset2@results$predictors <- "set2"
+
+bestmodelsset1 <- dplyr::filter(p1985evalset1@results, avg.test.AUC > 0.9)
+bestmodelsset2 <- dplyr::filter(p1985evalset2@results, avg.test.AUC > 0.9)
+#bind them together
+bestmodels <- rbind(bestmodelsset1, bestmodelsset2)
+bestmodels <- dplyr::filter(bestmodels, avg.test.or10pct < 0.10)
+bestmodels <- dplyr::filter(bestmodels, avg.test.orMTP < 0.01)
+bestmodels <- dplyr::filter(bestmodels, avg.diff.AUC < 0.01)
+bestmodel <- bestmodels[min(bestmodels$AICc) - bestmodels$AICc == 0,]
+# here you can report the stats of this model too
+bestmodel <- dplyr::select(bestmodel, c("mod.number", "predictors"))
+bestmodel # so it's set 2, model #26
+# here we can see which model it is
+mod.1985 <- p1985evalset2@models[[bestmodel$mod.number[26]]]
+
+# shows jackknife test results
+plot(mod.1985)
+# response curves
+response(mod.1985, "pforest")
+
+# predictions in geographic space **Relative Occurrance Rate**
+predict1985.co <- raster::predict(mod.1985, p1985)
+predict2020.co <- raster::predict(mod.1985, p2020)
+crs(predict1985.co) <- crs
+crs(predict2020.co) <- crs
+```
+
+
+```{r}
+# establish 95%, 75%, 50% cutoff
+occur2020$p <- 1
+abs2020$p <- 0
+pa2020 <- rbind(occur2020, abs2020)
+threshold <- confu_mat_optim(predict2020.co, pa2020, longitude = "long", latitude = "lat", pres_abs = "p", optim_by = "omission_error", step = 0.0005)
+threshold <- dplyr::select(threshold, "threshold", "sensibility")
+
+threshold
+# so set up thresholds for suitability at Sensitivity = 0.95, 0.75, and 0.5
+# so you have to dig through 'threshold'
+#0.95
+# ~ 0.0445
+#0.75
+# ~ 0.1735
+#0.5
+# ~ 0.4045
+
+values(predict1985.co)[values(predict1985.co) > 0.4045 & values(predict1985.co)<= 1] <- 3
+values(predict1985.co)[values(predict1985.co) > 0.1735 & values(predict1985.co) <= 0.4045] <- 2
+values(predict1985.co)[values(predict1985.co) > 0.0445 & values(predict1985.co) <= 0.1735] <- 1
+values(predict1985.co)[values(predict1985.co) >= 0 & values(predict1985.co) <= 0.0445] <- 0
+
+values(predict2020.co)[values(predict2020.co) > 0.4045 & values(predict2020.co)<= 1] <- 3
+values(predict2020.co)[values(predict2020.co) > 0.1735 & values(predict2020.co) <= 0.4045] <- 2
+values(predict2020.co)[values(predict2020.co) > 0.0445 & values(predict2020.co) <= 0.1735] <- 1
+values(predict2020.co)[values(predict2020.co) >= 0 & values(predict2020.co) <= 0.0445] <- 0
+
+
+# this gets you fig. 1
+map1985 <- ggplot() +
+  layer_spatial(data = predict1985.co) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .75) +
+  layer_spatial(data = SpatialPoints(occur1985, crs), size = 1, shape = 1) +
+  labs(title = "1935–1984") +
+  theme(plot.title = element_text(hjust = 0.5, size = 20, vjust = -4),
+        plot.margin = unit(c(.2,0,0,0), "cm"),
+        legend.position = "none") +
+  scalebar(x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax , location = "bottomleft", transform = T,
+           dist_unit = "km", dist = 500, height = 0.025, st.size = 3, border.size = 0.5) +
+  theme(text=element_text(family="Times New Roman"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.title=element_text(size=14)) 
+
+map2020 <- ggplot() +
+  layer_spatial(data = predict2020.co) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .75) +
+  layer_spatial(data = SpatialPoints(occur2020, crs), size = 1, shape = 1) +
+  labs(title = "2000–2019") +
+  theme(plot.title = element_text(hjust = 0.5, size = 20, vjust = -3)) +
+  theme(plot.margin = unit(c(.2,0,0,0), "cm"))+
+  theme(text=element_text(family="Times New Roman"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  north(symbol = 11,location = "bottomright", x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax, scale = 0.2)
+
+pastmapsSuitability <- ggarrange(map1985, map2020, align = "hv", ncol = 2, common.legend = T, legend = "bottom")
+
+tiff(filename = "suitability1985&2020.tif", width = 10, height = 4.8, units = "in", res = 120)
+pastmapsSuitability
+dev.off()
+
+```
+
+```{r}
+# calculate new regions now at least occupiable
+predict1985.co <- raster::predict(mod.1985, p1985)
+predict2020.co <- raster::predict(mod.1985, p2020)
+crs(predict1985.co) <- crs
+crs(predict2020.co) <- crs
+
+values(predict1985.co)[values(predict1985.co) > 0.4045 & values(predict1985.co)<= 1] <- 3
+values(predict1985.co)[values(predict1985.co) > 0.1735 & values(predict1985.co) <= 0.4045] <- 2
+values(predict1985.co)[values(predict1985.co) > 0.0445 & values(predict1985.co) <= 0.1735] <- 1
+values(predict1985.co)[values(predict1985.co) >= 0 & values(predict1985.co) <= 0.0445] <- 0
+
+values(predict2020.co)[values(predict2020.co) > 0.4045 & values(predict2020.co)<= 1] <- 3
+values(predict2020.co)[values(predict2020.co) > 0.1735 & values(predict2020.co) <= 0.4045] <- 2
+values(predict2020.co)[values(predict2020.co) > 0.0445 & values(predict2020.co) <= 0.1735] <- 1
+values(predict2020.co)[values(predict2020.co) >= 0 & values(predict2020.co) <= 0.0445] <- 0
+
+values(predict1985.co)[values(predict1985.co) >= 1] <- 1
+values(predict2020.co)[values(predict2020.co) >= 1] <- 1
+
+newarea2020 <- calc(stack(predict2020.co, predict1985.co), fun = sum)
+values(newarea2020)[values(newarea2020) == 2] <- 0
+
+county$newarea2020 <- raster::extract(newarea2020, county, fun = mean, na.rm = TRUE)
+?overlay
+
+choropleth(county, county$newarea2020, shading = shade.pa)
+county$area <- raster::area(county)
+
+hist(county$area)
+
+newarea.df <- dplyr::select(county@data, "newarea2020", "area")
+newarea.df <- filter(newarea.df, newarea2020 > 0.5)
+newarea.df$area <- newarea.df$area/1000000
+
+sum(newarea.df$area)
+
+# calculate average geographic shift of occupiable area in lat and long
+predict1985.co <- raster::predict(mod.1985, p1985)
+predict2020.co <- raster::predict(mod.1985, p2020)
+crs(predict1985.co) <- crs
+crs(predict2020.co) <- crs
+
+values(predict1985.co)[values(predict1985.co) > 0.4045 & values(predict1985.co)<= 1] <- 3
+values(predict1985.co)[values(predict1985.co) > 0.1735 & values(predict1985.co) <= 0.4045] <- 2
+values(predict1985.co)[values(predict1985.co) > 0.0445 & values(predict1985.co) <= 0.1735] <- 1
+values(predict1985.co)[values(predict1985.co) >= 0 & values(predict1985.co) <= 0.0445] <- 0
+
+values(predict2020.co)[values(predict2020.co) > 0.4045 & values(predict2020.co)<= 1] <- 3
+values(predict2020.co)[values(predict2020.co) > 0.1735 & values(predict2020.co) <= 0.4045] <- 2
+values(predict2020.co)[values(predict2020.co) > 0.0445 & values(predict2020.co) <= 0.1735] <- 1
+values(predict2020.co)[values(predict2020.co) >= 0 & values(predict2020.co) <= 0.0445] <- 0
+
+values(predict1985.co)[values(predict1985.co) > 1] <- 0
+values(predict2020.co)[values(predict2020.co) > 1] <- 0
+
+plot(predict1985.co)
+plot(predict2020.co)
+
+county$suitable1985 <- raster::extract(predict1985.co, county, fun = mean, na.rm = TRUE)
+county$suitable2020 <- raster::extract(predict2020.co, county, fun = mean, na.rm = TRUE)
+
+suitabilityshift <- dplyr::select(county@data, "suitable1985", "suitable2020", "lat", "long")
+
+mean(suitabilityshift$lat[suitabilityshift$suitable1985 == 1]) - mean(suitabilityshift$lat[suitabilityshift$suitable2020 == 1])
+library(geosphere)
+?distm
+distm(c(0, 0), c(0, 1.758044), fun = distHaversine)
+195704.6/1000
+mean(suitabilityshift$long[suitabilityshift$suitable1985 == 1]) - mean(suitabilityshift$long[suitabilityshift$suitable2020 == 1])
+distm(c(0, mean(suitabilityshift$lat)), c(0.6386175, mean(suitabilityshift$lat)), fun = distHaversine)
+195704.6/1000
+```
+
+
+```{r}
+# predicting into future
+# 2021-2040
+p2040ssp2 <- list.files("./predictors/p2040/ssp2", full.names = T)
+p2040ssp2 <- stack(p2040ssp2)
+p2040ssp3 <- list.files("./predictors/p2040/ssp3", full.names = T)
+p2040ssp3 <- stack(p2040ssp3)
+p2040ssp5 <- list.files("./predictors/p2040/ssp5", full.names = T)
+p2040ssp5 <- stack(p2040ssp5)
+
+#2041-2060
+p2060ssp2 <- list.files("./predictors/p2060/ssp2", full.names = T)
+p2060ssp2 <- stack(p2060ssp2)
+p2060ssp3 <- list.files("./predictors/p2060/ssp3", full.names = T)
+p2060ssp3 <- stack(p2060ssp3)
+p2060ssp5 <- list.files("./predictors/p2060/ssp5", full.names = T)
+p2060ssp5 <- stack(p2060ssp5)
+
+#2061-2080
+p2080ssp2 <- list.files("./predictors/p2080/ssp2", full.names = T)
+p2080ssp2 <- stack(p2080ssp2)
+p2080ssp3 <- list.files("./predictors/p2080/ssp3", full.names = T)
+p2080ssp3 <- stack(p2080ssp3)
+p2080ssp5 <- list.files("./predictors/p2080/ssp5", full.names = T)
+p2080ssp5 <- stack(p2080ssp5)
+
+crs(p2040ssp2) <- crs
+crs(p2040ssp3) <- crs
+crs(p2040ssp5) <- crs
+crs(p2060ssp2) <- crs
+crs(p2060ssp3) <- crs
+crs(p2060ssp5) <- crs
+crs(p2080ssp2) <- crs
+crs(p2080ssp3) <- crs
+crs(p2080ssp5) <- crs
+
+predict2040ssp2 <- predict(p2040ssp2, mod.1985)
+predict2040ssp3 <- predict(p2040ssp3, mod.1985)
+predict2040ssp5 <- predict(p2040ssp5, mod.1985)
+predict2060ssp2 <- predict(p2060ssp2, mod.1985)
+predict2060ssp3 <- predict(p2060ssp3, mod.1985)
+predict2060ssp5 <- predict(p2060ssp5, mod.1985)
+predict2080ssp2 <- predict(p2080ssp2, mod.1985)
+predict2080ssp3 <- predict(p2080ssp3, mod.1985)
+predict2080ssp5 <- predict(p2080ssp5, mod.1985)
+
+crs(predict2040ssp2) <- crs
+crs(predict2040ssp3) <- crs
+crs(predict2040ssp5) <- crs
+crs(predict2060ssp2) <- crs
+crs(predict2060ssp3) <- crs
+crs(predict2060ssp5) <- crs
+crs(predict2080ssp2) <- crs
+crs(predict2080ssp3) <- crs
+crs(predict2080ssp5) <- crs
+
+plot(predict2040ssp2)
+plot(state, add = T)
+plot(predict2080ssp5)
+plot(state, add = T)
+```
+
+```{r}
+# changing to suitability scores
+
+# 2040
+values(predict2040ssp2)[values(predict2040ssp2) > 0.4045 & values(predict2040ssp2)<= 1] <- 3
+values(predict2040ssp2)[values(predict2040ssp2) > 0.1735 & values(predict2040ssp2) <= 0.4045] <- 2
+values(predict2040ssp2)[values(predict2040ssp2) > 0.0445 & values(predict2040ssp2) <= 0.1735] <- 1
+values(predict2040ssp2)[values(predict2040ssp2) == 0 & values(predict2040ssp2) <= 0.0445] <- 0
+
+values(predict2040ssp3)[values(predict2040ssp3) > 0.4045 & values(predict2040ssp3)<= 1] <- 3
+values(predict2040ssp3)[values(predict2040ssp3) > 0.1735 & values(predict2040ssp3) <= 0.4045] <- 2
+values(predict2040ssp3)[values(predict2040ssp3) > 0.0445 & values(predict2040ssp3) <= 0.1735] <- 1
+values(predict2040ssp3)[values(predict2040ssp3) == 0 & values(predict2040ssp3) <= 0.0445] <- 0
+
+values(predict2040ssp5)[values(predict2040ssp5) > 0.4045 & values(predict2040ssp5)<= 1] <- 3
+values(predict2040ssp5)[values(predict2040ssp5) > 0.1735 & values(predict2040ssp5) <= 0.4045] <- 2
+values(predict2040ssp5)[values(predict2040ssp5) > 0.0445 & values(predict2040ssp5) <= 0.1735] <- 1
+values(predict2040ssp5)[values(predict2040ssp5) == 0 & values(predict2040ssp5) <= 0.0445] <- 0
+
+#2060
+values(predict2060ssp2)[values(predict2060ssp2) > 0.4045 & values(predict2060ssp2)<= 1] <- 3
+values(predict2060ssp2)[values(predict2060ssp2) > 0.1735 & values(predict2060ssp2) <= 0.4045] <- 2
+values(predict2060ssp2)[values(predict2060ssp2) > 0.0445 & values(predict2060ssp2) <= 0.1735] <- 1
+values(predict2060ssp2)[values(predict2060ssp2) == 0 & values(predict2060ssp2) <= 0.0445] <- 0
+
+values(predict2060ssp3)[values(predict2060ssp3) > 0.4045 & values(predict2060ssp3)<= 1] <- 3
+values(predict2060ssp3)[values(predict2060ssp3) > 0.1735 & values(predict2060ssp3) <= 0.4045] <- 2
+values(predict2060ssp3)[values(predict2060ssp3) > 0.0445 & values(predict2060ssp3) <= 0.1735] <- 1
+values(predict2060ssp3)[values(predict2060ssp3) == 0 & values(predict2060ssp3) <= 0.0445] <- 0
+
+values(predict2060ssp5)[values(predict2060ssp5) > 0.4045 & values(predict2060ssp5)<= 1] <- 3
+values(predict2060ssp5)[values(predict2060ssp5) > 0.1735 & values(predict2060ssp5) <= 0.4045] <- 2
+values(predict2060ssp5)[values(predict2060ssp5) > 0.0445 & values(predict2060ssp5) <= 0.1735] <- 1
+values(predict2060ssp5)[values(predict2060ssp5) == 0 & values(predict2060ssp5) <= 0.0445] <- 0
+
+
+#2080
+values(predict2080ssp2)[values(predict2080ssp2) > 0.4045 & values(predict2080ssp2)<= 1] <- 3
+values(predict2080ssp2)[values(predict2080ssp2) > 0.1735 & values(predict2080ssp2) <= 0.4045] <- 2
+values(predict2080ssp2)[values(predict2080ssp2) > 0.0445 & values(predict2080ssp2) <= 0.1735] <- 1
+values(predict2080ssp2)[values(predict2080ssp2) == 0 & values(predict2080ssp2) <= 0.0445] <- 0
+
+values(predict2080ssp3)[values(predict2080ssp3) > 0.4045 & values(predict2080ssp3)<= 1] <- 3
+values(predict2080ssp3)[values(predict2080ssp3) > 0.1735 & values(predict2080ssp3) <= 0.4045] <- 2
+values(predict2080ssp3)[values(predict2080ssp3) > 0.0445 & values(predict2080ssp3) <= 0.1735] <- 1
+values(predict2080ssp3)[values(predict2080ssp3) == 0 & values(predict2080ssp3) <= 0.0445] <- 0
+
+values(predict2080ssp5)[values(predict2080ssp5) > 0.4045 & values(predict2080ssp5)<= 1] <- 3
+values(predict2080ssp5)[values(predict2080ssp5) > 0.1735 & values(predict2080ssp5) <= 0.4045] <- 2
+values(predict2080ssp5)[values(predict2080ssp5) > 0.0445 & values(predict2080ssp5) <= 0.1735] <- 1
+values(predict2080ssp5)[values(predict2080ssp5) == 0 & values(predict2080ssp5) <= 0.0445] <- 0
+```
+
+```{r}
+map2040ssp2 <- ggplot() +
+  layer_spatial(data = predict2040ssp2) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2021–2040 SSP-2") +
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"),
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.title = element_text(size = 14)) +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size = "12"))
+
+map2040ssp3 <- ggplot() +
+  layer_spatial(data = predict2040ssp3) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2021–2040 SSP-3")+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+map2040ssp5 <- ggplot() +
+  layer_spatial(data = predict2040ssp5) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2021–2040 SSP-5")+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+map2060ssp2 <- ggplot() +
+  layer_spatial(data = predict2060ssp2) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2041–2060 SSP-2")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size = "12"))
+
+map2060ssp3 <- ggplot() +
+  layer_spatial(data = predict2060ssp3) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2041–2060 SSP-3")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none",
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  theme(text=element_text(family="Times New Roman", color = "black"))
+
+map2060ssp5 <- ggplot() +
+  layer_spatial(data = predict2060ssp5) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2041–2060 SSP-5")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none",
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  theme(text=element_text(family="Times New Roman", color = "black"))
+
+map2080ssp2 <- ggplot() +
+  layer_spatial(data = predict2080ssp2) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2061–2080 SSP-2")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  scalebar(x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax , location = "bottomleft", transform = T,
+           dist_unit = "km", dist = 500, height = 0.025, st.dist= 0.03, st.size = 3, border.size = 0.5)
+
+map2080ssp3 <- ggplot() +
+  layer_spatial(data = predict2080ssp3) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2061–2080 SSP-3")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+map2080ssp5 <- ggplot() +
+  layer_spatial(data = predict2080ssp5) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2061–2080 SSP-5")+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20)) +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  north(symbol = 11,location = "bottomright", x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax, scale = 0.2)
+
+futuresuitability <- ggarrange(map2040ssp2, map2040ssp3, map2040ssp5,
+                               map2060ssp2, map2060ssp3, map2060ssp5,
+                               map2080ssp2, map2080ssp3, map2080ssp5,
+                               ncol = 3, nrow = 3, common.legend = T, legend = "bottom", align = "hv")
+
+# figure 2
+tiff(filename = "suitabilityfuture.tif", width = 10, height = 8.5, units = "in", res = 90)
+futuresuitability
+dev.off()
+```
+
+```{r}
+#exptrapolation detection
+remotes::install_github("densitymodelling/dsmextra")
+library(ntbox)
+
+names(p1985)
+names(p2040ssp2)
+# they are more predictors than used in the model ... subset them in the exdet_* function
+
+mapexdet402NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp2,c(2,3,4,7)))
+mapexdet403NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp3,c(2,3,4,7)))
+mapexdet405NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp5,c(2,3,4,7)))
+mapexdet602NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp2,c(2,3,4,7)))
+mapexdet603NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp3,c(2,3,4,7)))
+mapexdet605NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp5,c(2,3,4,7)))
+mapexdet802NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp2,c(2,3,4,7)))
+mapexdet803NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp3,c(2,3,4,7)))
+mapexdet805NT2 <- exdet_multvar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp5,c(2,3,4,7)))
+
+mapexdet402NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp2,c(2,3,4,7)))
+mapexdet403NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp3,c(2,3,4,7)))
+mapexdet405NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2040ssp5,c(2,3,4,7)))
+mapexdet602NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp2,c(2,3,4,7)))
+mapexdet603NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp3,c(2,3,4,7)))
+mapexdet605NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2060ssp5,c(2,3,4,7)))
+mapexdet802NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp2,c(2,3,4,7)))
+mapexdet803NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp3,c(2,3,4,7)))
+mapexdet805NT1 <- exdet_univar(raster::subset(p1985,c(2,3,4,7)), raster::subset(p2080ssp5,c(2,3,4,7)))
+
+values(mapexdet402NT1)[values(mapexdet402NT1) == 0] <- NA
+values(mapexdet402NT2)[values(mapexdet402NT1) < 0] <- NA
+values(mapexdet403NT1)[values(mapexdet403NT1) == 0] <- NA
+values(mapexdet403NT2)[values(mapexdet403NT1) < 0] <- NA
+values(mapexdet405NT1)[values(mapexdet405NT1) == 0] <- NA
+values(mapexdet405NT2)[values(mapexdet405NT1) < 0] <- NA
+values(mapexdet602NT1)[values(mapexdet602NT1) == 0] <- NA
+values(mapexdet602NT2)[values(mapexdet602NT1) < 0] <- NA
+values(mapexdet603NT1)[values(mapexdet603NT1) == 0] <- NA
+values(mapexdet603NT2)[values(mapexdet603NT1) < 0] <- NA
+values(mapexdet605NT1)[values(mapexdet605NT1) == 0] <- NA
+values(mapexdet605NT2)[values(mapexdet605NT1) < 0] <- NA
+values(mapexdet802NT1)[values(mapexdet802NT1) == 0] <- NA
+values(mapexdet802NT2)[values(mapexdet802NT1) < 0] <- NA
+values(mapexdet803NT1)[values(mapexdet803NT1) == 0] <- NA
+values(mapexdet803NT2)[values(mapexdet803NT1) < 0] <- NA
+values(mapexdet805NT1)[values(mapexdet805NT1) == 0] <- NA
+values(mapexdet805NT2)[values(mapexdet805NT1) < 0] <- NA
+```
+
+
+```{r}
+map2080ssp3 <- ggplot() +
+  layer_spatial(data = predict2080ssp3) +
+  scale_fill_gradientn(colors = c("blue", "yellow", "orange", "red"),
+                      guide = "legend", na.value = NA, limits = c(0,3.01), 
+                      breaks = c(0, 1, 2, 3), name = "Suitability Index  ") + 
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  labs(title = "2061–2080 SSP-3")+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"),
+        plot.title = element_text(hjust = 0.5, size = 15, vjust = -20),
+        legend.position = "none") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+mapex402 <- ggplot() + 
+  layer_spatial(data = mapexdet402NT2) +
+  layer_spatial(data = mapexdet402NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank()) +   
+  labs(title = "2021–2040 SSP-2") +
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+mapex403 <- ggplot() + 
+  layer_spatial(data = mapexdet403NT2) +
+  layer_spatial(data = mapexdet403NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+  
+  labs(title = "2021–2040 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+mapex405 <- ggplot() + 
+  layer_spatial(data = mapexdet405NT2) +
+  layer_spatial(data = mapexdet405NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2021–2040 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+mapex602 <- ggplot() + 
+  layer_spatial(data = mapexdet602NT2) +
+  layer_spatial(data = mapexdet602NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2041–2060 SSP-2")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+mapex603 <- ggplot() + 
+  layer_spatial(data = mapexdet603NT2) +
+  layer_spatial(data = mapexdet603NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2041–2060 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+mapex605 <- ggplot() + 
+  layer_spatial(data = mapexdet605NT2) +
+  layer_spatial(data = mapexdet605NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2041–2060 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+mapex802 <- ggplot() + 
+  layer_spatial(data = mapexdet802NT2) +
+  layer_spatial(data = mapexdet802NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2061–2080 SSP-2")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))+
+  scalebar(x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax , location = "bottomleft", transform = T,
+           dist_unit = "km", dist = 500, height = 0.025, st.dist= 0.03, st.size = 3, border.size = 0.5)
+
+mapex803 <- ggplot() + 
+  layer_spatial(data = mapexdet803NT2) +
+  layer_spatial(data = mapexdet803NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank())+   
+  labs(title = "2061–2080 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+mapex805 <- ggplot() + 
+  layer_spatial(data = mapexdet805NT2) +
+  layer_spatial(data = mapexdet805NT1) +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4) +
+  scale_fill_gradientn(colors = c("red", "white", "#99CCFF", "#0080FF","#0000FF", "blue"), 
+                       guide = guide_colorbar(ticks = F), na.value = NA,
+                       breaks = c(-0.25, -.125, 0, 0.25, 0.5, 0.75, 1), limits = c(-.25, 1),
+                       labels = c(-0.25, "NT1", 0,"", "NT2", "", 1)) +
+  theme_minimal() +
+  theme(legend.position= "bottom",
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "12"),
+        plot.title = element_text(hjust = 0.5, size = 15),
+        legend.title = element_blank()) +   
+  labs(title = "2061–2080 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))+
+  north(symbol = 11,location = "bottomright", x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax, scale = 0.2)
+
+# figure 3
+tiff(filename = "exdetfutures.tif", width = 10, height = 8.5, units = "in", res = 90)
+ggarrange(mapex402, mapex403, mapex405,
+          mapex602, mapex603, mapex605,
+          mapex802, mapex803, mapex805,
+          ncol = 3, nrow = 3, legend = "bottom", common.legend = T, align = "hv")
+dev.off()
+
+```
+
+```{r}
+?limiting
+limit2040ssp2 <- limiting(p2040ssp2, mod.1985)
+limit2040ssp3 <- limiting(p2040ssp3, mod.1985)
+limit2040ssp5 <- limiting(p2040ssp5, mod.1985)
+limit2060ssp2 <- limiting(p2060ssp2, mod.1985)
+limit2060ssp3 <- limiting(p2060ssp3, mod.1985)
+limit2060ssp5 <- limiting(p2060ssp5, mod.1985)
+limit2080ssp2 <- limiting(p2080ssp2, mod.1985)
+limit2080ssp3 <- limiting(p2080ssp3, mod.1985)
+limit2080ssp5 <- limiting(p2080ssp5, mod.1985)
+```
+
+
+```{r}
+maplimit402 <- ggplot() +
+  layer_spatial(limit2040ssp2)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor ", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+   
+  labs(title = "2021–2040 SSP-2")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size = "12"),
+        legend.title = element_text(size = 14))+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+maplimit403 <- ggplot() +
+  layer_spatial(limit2040ssp3)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+   
+  labs(title = "2021–2040 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+maplimit405 <- ggplot() +
+  layer_spatial(limit2040ssp5)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+  
+  labs(title = "2021–2040 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0.1,-0.25,-0.25,-0.25), "in"))
+
+maplimit602 <- ggplot() +
+  layer_spatial(limit2060ssp2)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+   
+  labs(title = "2041–2060 SSP-2")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+maplimit603 <- ggplot() +
+  layer_spatial(limit2060ssp3)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+   
+  labs(title = "2041–2060 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+maplimit605 <- ggplot() +
+  layer_spatial(limit2060ssp5)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+   
+  labs(title = "2041–2060 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+maplimit802 <- ggplot() +
+  layer_spatial(limit2080ssp2)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+   
+  theme(plot.title = element_text(hjust = 0.5, size = 15))+
+  labs(title = "2061–2080 SSP-2")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))+
+  scalebar(x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax , location = "bottomleft", transform = T,
+           dist_unit = "km", dist = 500, height = 0.025, st.dist= 0.03, st.size = 3, border.size = 0.5)
+
+maplimit803 <- ggplot() +
+  layer_spatial(limit2080ssp3)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),)+   
+  labs(title = "2061–2080 SSP-3")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.25,-0.25), "in"))
+
+maplimit805 <- ggplot() +
+  layer_spatial(limit2080ssp5)+
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .4)  + 
+  scale_fill_viridis_c(guide = "legend", name = "Limiting Factor", labels = c("Mixed/Evergreeen forest", "Precipitation", "Seasonality", "Temperuature Minimum"), na.value = NA) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),)+   
+  labs(title = "2061–2080 SSP-5")+
+  theme(text=element_text(family="Times New Roman", color = "black"),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())+
+  theme(plot.margin = unit(c(0,-0.25,-0.1,-0.25), "in"))+
+  north(symbol = 11,location = "bottomright", x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax, scale = 0.2)
+
+# figure 4
+tiff(filename = "limitingfactor.tif", width = 10, height = 8.5, units = "in", res = 90)
+ggarrange(maplimit402, maplimit403, maplimit405,
+          maplimit602, maplimit603, maplimit605,
+          maplimit802, maplimit803, maplimit805, 
+          common.legend = T, legend = "bottom", align = "hv",
+          nrow = 3, ncol = 3)
+dev.off()
+```
+
+```{r}
+pforest2008map <- ggplot() +
+  layer_spatial(pforest2008.co) + 
+  scale_fill_gradient(low = "white", high = "darkgreen", guide = "colorbar", name = "Percent   ", na.value = NA) +
+  theme_minimal() +
+  layer_spatial(data = state, alpha = 0.001, col = "grey", size = .25) +
+  theme(plot.title = element_text(hjust = 0.5, size = 12),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.key.width=unit(2,"cm"),
+        legend.text = element_text(size = "10"),
+        legend.title = element_text(size = "12")) +
+  theme(text=element_text(family="Times New Roman", color = "black")) +
+  scalebar(x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax , location = "bottomleft", transform = T,
+           dist_unit = "km", dist = 500, height = 0.025, st.dist= 0.03, st.size = 3, border.size = 0.5) +
+  north(symbol = 11,location = "bottomright", x.min = xmin, x.max = xmax, y.min = ymin, y.max = ymax, scale = 0.2) +
+  theme(plot.margin = unit(c(-.1,-.1,-.1,-.1), "in"))
+?north
+northSymbols()
+
+# figure 5
+tiff(filename = "pforest2008map.tif", width = 6, height = 5.4, units = "in", res = 150)
+ggarrange(pforest2008map, 
+          common.legend = T, legend = "bottom", align = "hv",
+          nrow = 1, ncol = 1)
+dev.off()
+```
+

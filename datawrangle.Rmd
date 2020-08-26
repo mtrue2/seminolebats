@@ -1,0 +1,1719 @@
+---
+title: "seminolebats"
+author: "MTrue"
+date: "4/23/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE, warning = FALSE}
+library(dplyr)
+library(plyr)
+library(raster)
+library(GISTools)
+library(prism)
+library(sp)
+library(tidyverse)
+library(corrplot)
+```
+
+```{r}
+# the US shapefiles from census.gov
+county <- shapefile('./cb_2018_us_county_500k/cb_2018_us_county_500k.shp')
+names(county)[5] <- 'FIPS' # county codes for merging bat data
+state <- shapefile('./cb_2018_us_state_500k/cb_2018_us_state_500k.shp')
+us <- shapefile('./cb_2018_us_nation_5m/cb_2018_us_nation_5m.shp')
+
+# each of these uses NAD83, but we're going to change to WGS84
+# I know future climatic variables has a WGS 84 datum, so we're going to use that to reproject all our layers
+crsref <- raster("./weather/y2021.2040/tmin/wc2.1_2.5m_tmin_CanESM5_ssp245_2021-2040.tif")
+res(crsref)
+crs <- crs(crsref)
+
+# so crs is our reference datum and can reproject to this datum for all other rasters
+county <- spTransform(county, crs)
+state <- spTransform(state, crs)
+us <- spTransform(us, crs)
+```
+
+```{r}
+#### OCCURRENCE RECORD MANIPULATION ####
+
+# I have not supplied the data from Perry et al 2018, Georgia State Wildlife Agency, mist net captures from the authors for confidentiality purposes (ie some have specific GPS points). Contact the first author for a data.frame containing county centroids of occurrences 1935-1984 or 2000-2019
+
+# First access downloaded gbif records
+# filter to 2000-2020 records
+# filter to 1935-1985 records
+
+gbif <- read.csv("./gbif/gbif.csv")
+gbif <- filter(gbif, year > 1934, month > 3, month < 12)
+gbif <- dplyr::select(gbif, "decimalLongitude","decimalLatitude", "year", "month")
+names(gbif) <- c("long", "lat", "year", "month")
+gbif <- na.omit(gbif)
+gbif2020 <- dplyr::filter(gbif, year > 1998)
+gbif1985 <- dplyr::filter(gbif, year < 1985)
+gbif2020 <- dplyr::select(gbif2020, "long","lat")
+gbif1985 <- dplyr::select(gbif1985, "long","lat")
+gbif2020 <- SpatialPoints(gbif2020, crs)
+gbif1985 <- SpatialPoints(gbif1985, crs)
+
+county$gbif1985 <- poly.counts(gbif1985, county)
+county$gbif2020 <- poly.counts(gbif2020, county)
+
+#### Georgia data !
+
+ga <- read.csv("./GAmistnetLASE.csv")
+ga <- dplyr::filter(ga, Year > 1999, Month > 3, Month < 12)
+ga <- dplyr::select(ga, "Long", "Lat")
+ga <- SpatialPoints(ga, proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+county$ga <- poly.counts(ga, county)
+
+#### data from Perry (2018)
+
+bat <- read.csv("./seminolerecords.csv")
+
+bat1985 <- filter(bat, YEAR < 1985, MONTH > 3, MONTH < 12, YEAR > 1934)
+bat2020 <- filter(bat, YEAR > 1999, MONTH > 3, MONTH < 12)
+bat2020 <- mutate(bat2020, p = 1)
+bat1985 <- mutate(bat1985, p = 1)
+
+# get a column in county with 2000-2020 records
+# it dropped the first zero in the first 75 rows
+bat2020$FIPS[1:71] <- paste0("0", bat2020$FIPS[1:71])
+bat2020 <- dplyr::select(bat2020, c("FIPS", "p"))
+names(bat2020)[2] <- "bat2020"
+
+county@data <- join(county@data, bat2020, by = "FIPS", match = "first")
+
+county$bat2020[is.na(county$bat2020)] <- 0
+
+# now pre-1985
+# for FIPS county codes it dropped the first zero in the first 12 rows
+bat1985$FIPS[1:12] <- paste0("0", bat1985$FIPS[1:12])
+bat1985 <- dplyr::select(bat1985, c("FIPS", "p"))
+names(bat1985)[2] <- "bat1985"
+
+county@data <- join(county@data, bat1985, by = "FIPS", match = "first")
+
+county$bat1985[is.na(county$bat1985)] <- 0
+
+# combine all data
+county$p1985 <- county$gbif1985 + county$bat1985
+county$p2020 <- county$gbif2020 + county$bat2020 + county$ga
+
+#make pres/abs
+county$p1985[county$p1985 > 0] <- 1
+county$p2020[county$p2020 > 0] <- 1
+
+summary(county$p1985)
+summary(county$p2020)
+
+centroids <- getSpPPolygonsLabptSlots(county)
+centroids <- data.frame(centroids)
+names(centroids) <- c("long", "lat")
+county@data <- cbind(county@data, centroids)
+
+# calc max and min for x and y based on records -- add additional 2 degrees long, 3.5 latitude
+county$all <- county$p1985 + county$p2020
+county$all[county$all > 0] <- 1
+countyall <- filter(county@data, all > 0)
+
+xmin <- min(countyall$long - 3.5)
+xmax <- max(countyall$long + 3.5)
+ymin <- min(countyall$lat - 2)
+ymax <- max(countyall$lat + 2)
+
+extent <- extent(c(xmin, xmax, ymin, ymax))
+county <- crop(county, extent)
+
+county$long <- NULL
+county$lat <- NULL
+
+centroids <- getSpPPolygonsLabptSlots(county)
+centroids <- data.frame(centroids)
+names(centroids) <- c("long", "lat")
+county@data <- cbind(county@data, centroids)
+
+shade.pa <- shading(breaks = 0.5, cols = c("White", "Red"))
+choropleth(county, county$all, shade.pa)
+
+#filter out outlier records (add M. True records)
+
+choropleth(county, county$p1985, shade.pa)
+county$p1985[county$FIPS == 36109] <- 0 # NY record
+county$p1985[county$FIPS == 42071] <- 0 # PA record
+choropleth(county, county$p1985, shade.pa) # now they're gone
+
+choropleth(county, county$p2020, shade.pa)
+county$p2020[county$FIPS == 48465] <- 0 # West Texas record
+county$p2020[county$FIPS == 40075] <- 0 # West Oklahoma record
+county$p2020[county$FIPS == 21067] <- 0 # eastern KY record
+county$p2020[county$FIPS == 55079] <- 0 # Wisconsin record
+county$p2020[county$FIPS == 10005] <- 1 # Sussex county DE (add M. True record)
+county$p2020[county$FIPS == 51131] <- 1 # Northampton county VA (add M. True record)
+choropleth(county, county$p2020, shade.pa) # they gone
+
+# make a dataframe of occurrences/pseudoabsences
+
+occur1985 <- data.frame(cbind(county$long, county$lat, county$p1985))
+names(occur1985) <- c("long", "lat", "p")
+
+abs1985 <- dplyr::filter(occur1985, p == 0)
+abs1985$p <- NULL
+
+occur1985 <- dplyr::filter(occur1985, p > 0)
+occur1985$p <- NULL
+
+# 2000-2020 records for transferability test
+
+occur2020 <- data.frame(cbind(county$long, county$lat, county$p2020))
+names(occur2020) <- c("long", "lat", "p")
+abs2020 <- dplyr::filter(occur2020, p == 0)
+abs2020$p <- NULL
+
+occur2020 <- dplyr::filter(occur2020, p > 0)
+occur2020$p <- NULL
+
+#write to csvs
+write.csv(occur1985, "./data/occur1985.csv", row.names = F)
+write.csv(abs1985, "./data/abs1985.csv", row.names = F)
+write.csv(occur2020, "./data/occur2020.csv", row.names = F)
+write.csv(abs2020, "./data/abs2020.csv", row.names = F)
+
+# additionally, crop state and us for later visualization
+state <- crop(state, extent)
+us <- crop(us, extent)
+```
+
+```{r}
+# Aquiring climatic data from PRISM
+
+# get historical data from PRISM
+options(prism.path = "./weather/y1935.1985/precipitation")
+get_prism_monthlys(type ="ppt", years = c(1935:1984), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y1935.1985/tmin")
+get_prism_monthlys(type ="tmin", years = c(1935:1984), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y1935.1985/tmax")
+get_prism_monthlys(type ="tmax", years = c(1935:1984), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y1935.1985/tmean")
+get_prism_monthlys(type ="tmean", years = c(1935:1984), mon = c(1:12), keepZip = F)
+
+# recent data
+options(prism.path = "./weather/y2000.2020/precipitation")
+get_prism_monthlys(type ="ppt", years = c(2000:2019), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y2000.2020/tmin")
+get_prism_monthlys(type ="tmin", years = c(2000:2019), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y2000.2020/tmax")
+get_prism_monthlys(type ="tmax", years = c(2000:2019), mon = c(1:12), keepZip = F)
+
+options(prism.path = "./weather/y2000.2020/tmean")
+get_prism_monthlys(type ="tmean", years = c(2000:2019), mon = c(1:12), keepZip = F)
+
+######
+```
+
+```{r}
+# So the CMIP6 (future climate models) files are basically 12 rasters containing the avg prec, temp, ect of each month through the time period (for example 2021-2040), so we need to make monthly avgs for each variable for our time periods (1935-1985, 2000-2020)
+
+# here we do a series of commands to ultimately create a dataframe that contains all the files you need for the merge
+
+### precip ###
+precipold <- list.files(path = "./weather/y1935.1985/precipitation",
+           pattern = "*_bil$",
+           full.names = T)
+precipold <- as.data.frame(precipold)
+names(precipold) <- "folder"
+precipold$file <- list.files(path = "./weather/y1935.1985/precipitation",
+           pattern = "*_bil$",
+           full.names = F)
+precipold$filedir <- paste(precipold$folder, precipold$file, sep = "/")
+precipold$filedir <- paste0(precipold$filedir, sep = ".bil")
+
+precipold$month <- rep(1:12)
+
+# create list of 12 for average months
+preciplistmony1935.1985 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  preciplistmony1935.1985[[i]] <- stack(precipold$filedir[precipold$month == i])
+}
+# average multiple years over every month
+precipavgmonths1935.1985 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  precipavgmonths1935.1985[[i]] <- calc(preciplistmony1935.1985[[i]], fun = mean)
+}
+
+precipavgmonths1935.1985 <- stack(precipavgmonths1935.1985)
+precipavgmonths1935.1985 <- projectRaster(precipavgmonths1935.1985, crs = crs)
+precipavgmonths1935.1985 <- crop(precipavgmonths1935.1985, extent)
+precipavgmonths1935.1985 <- stack(precipavgmonths1935.1985)
+
+rm(preciplistmony1935.1985)
+rm(precipold)
+
+### tmin ###
+# here we do a series of commands to ultimately create a dataframe that contains all the files you need for the merge
+tminold <- list.files(path = "./weather/y1935.1985/tmin",
+           pattern = "*_bil$",
+           full.names = T)
+tminold <- as.data.frame(tminold)
+names(tminold) <- "folder"
+tminold$file <- list.files(path = "./weather/y1935.1985/tmin",
+           pattern = "*_bil$",
+           full.names = F)
+tminold$filedir <- paste(tminold$folder, tminold$file, sep = "/")
+tminold$filedir <- paste0(tminold$filedir, sep = ".bil")
+
+tminold$month <- rep(1:12)
+
+# create list of 12 for average months
+tminlistmony1935.1985 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tminlistmony1935.1985[[i]] <- stack(tminold$filedir[tminold$month == i])
+}
+# average multiple years over every month
+tminavgmonths1935.1985 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tminavgmonths1935.1985[[i]] <- calc(tminlistmony1935.1985[[i]], fun = mean)
+}
+
+tminavgmonths1935.1985 <- stack(tminavgmonths1935.1985)
+tminavgmonths1935.1985 <-  projectRaster(tminavgmonths1935.1985, crs = crs)
+tminavgmonths1935.1985 <- crop(tminavgmonths1935.1985, extent)
+tminavgmonths1935.1985 <- stack(tminavgmonths1935.1985)
+
+rm(tminlistmony1935.1985)
+rm(tminold)
+
+#### tmean ####
+
+tmeanold <- list.files(path = "./weather/y1935.1985/tmean",
+           pattern = "*_bil$",
+           full.names = T)
+tmeanold <- as.data.frame(tmeanold)
+names(tmeanold) <- "folder"
+tmeanold$file <- list.files(path = "./weather/y1935.1985/tmean",
+           pattern = "*_bil$",
+           full.names = F)
+tmeanold$filedir <- paste(tmeanold$folder, tmeanold$file, sep = "/")
+tmeanold$filedir <- paste0(tmeanold$filedir, sep = ".bil")
+
+tmeanold$month <- rep(1:12)
+
+# create list of 12 for average months
+tmeanlistmony1935.1985 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tmeanlistmony1935.1985[[i]] <- stack(tmeanold$filedir[tmeanold$month == i])
+}
+# average multiple years over every month
+tmeanavgmonths1935.1985 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tmeanavgmonths1935.1985[[i]] <- calc(tmeanlistmony1935.1985[[i]], fun = mean)
+}
+
+tmeanavgmonths1935.1985 <- stack(tmeanavgmonths1935.1985)
+tmeanavgmonths1935.1985 <-  projectRaster(tmeanavgmonths1935.1985, crs = crs)
+tmeanavgmonths1935.1985 <- crop(tmeanavgmonths1935.1985, extent)
+tmeanavgmonths1935.1985 <- stack(tmeanavgmonths1935.1985)
+
+rm(tmeanlistmony1935.1985)
+rm(tmeanold)
+
+plot(tmeanavgmonths1935.1985)
+
+#### tmax ####
+
+tmaxold <- list.files(path = "./weather/y1935.1985/tmax",
+           pattern = "*_bil$",
+           full.names = T)
+tmaxold <- as.data.frame(tmaxold)
+names(tmaxold) <- "folder"
+tmaxold$file <- list.files(path = "./weather/y1935.1985/tmax",
+           pattern = "*_bil$",
+           full.names = F)
+tmaxold$filedir <- paste(tmaxold$folder, tmaxold$file, sep = "/")
+tmaxold$filedir <- paste0(tmaxold$filedir, sep = ".bil")
+
+tmaxold$month <- rep(1:12)
+
+# create list of 12 for average months
+tmaxlistmony1935.1985 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tmaxlistmony1935.1985[[i]] <- stack(tmaxold$filedir[tmaxold$month == i])
+}
+# average multiple years over every month
+tmaxavgmonths1935.1985 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tmaxavgmonths1935.1985[[i]] <- calc(tmaxlistmony1935.1985[[i]], fun = mean)
+}
+
+tmaxavgmonths1935.1985 <- stack(tmaxavgmonths1935.1985)
+tmaxavgmonths1935.1985 <-  projectRaster(tmaxavgmonths1935.1985, crs = crs)
+tmaxavgmonths1935.1985 <- crop(tmaxavgmonths1935.1985, extent)
+tmaxavgmonths1935.1985 <- stack(tmaxavgmonths1935.1985)
+
+rm(tmaxlistmony1935.1985)
+rm(tmaxold)
+
+plot(tmaxavgmonths1935.1985)
+
+#### now on to the 2000.2020 stuff #### the key here is to make sure that the months are in order #### prism has 'stable' and 'provisional' raster types -- the last two months of 2019 are provisional (could change), which just altered our code a bit
+
+### precip ###
+precipnew <- list.files(path = "./weather/y2000.2020/precipitation",
+           pattern = "*_bil$",
+           full.names = T)
+precipnew <- as.data.frame(precipnew)
+names(precipnew) <- "folder"
+precipnew$file <- list.files(path = "./weather/y2000.2020/precipitation",
+           pattern = "*_bil$",
+           full.names = F)
+precipnew$filedir <- paste(precipnew$folder, precipnew$file, sep = "/")
+precipnew$filedir <- paste0(precipnew$filedir, sep = ".bil")
+precipnewTOP <- precipnew[1:2, 1:3]
+precipnewBOTTOM <- precipnew[3:nrow(precipnew), 1:3]
+precipnew <- rbind(precipnewBOTTOM, precipnewTOP)
+
+precipnew$month <- rep(1:12)
+
+# create list of 12 for average months
+preciplistmony2000.2020 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  preciplistmony2000.2020[[i]] <- stack(precipnew$filedir[precipnew$month == i])
+}
+# average multiple years over every month
+precipavgmonths2000.2020 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  precipavgmonths2000.2020[[i]] <- calc(preciplistmony2000.2020[[i]], fun = mean)
+}
+
+precipavgmonths2000.2020 <- stack(precipavgmonths2000.2020)
+precipavgmonths2000.2020 <-  projectRaster(precipavgmonths2000.2020, crs = crs)
+precipavgmonths2000.2020 <- crop(precipavgmonths2000.2020, extent)
+precipavgmonths2000.2020 <- stack(precipavgmonths2000.2020)
+
+rm(preciplistmony2000.2020)
+rm(precipnew)
+rm(precipnewBOTTOM)
+rm(precipnewTOP)
+
+#### tmin ####
+tminnew <- list.files(path = "./weather/y2000.2020/tmin",
+           pattern = "*_bil$",
+           full.names = T)
+tminnew <- as.data.frame(tminnew)
+names(tminnew) <- "folder"
+tminnew$file <- list.files(path = "./weather/y2000.2020/tmin",
+           pattern = "*_bil$",
+           full.names = F)
+tminnew$filedir <- paste(tminnew$folder, tminnew$file, sep = "/")
+tminnew$filedir <- paste0(tminnew$filedir, sep = ".bil")
+tminnewTOP <- tminnew[1:2, 1:3]
+tminnewBOTTOM <- tminnew[3:nrow(tminnew), 1:3]
+tminnew <- rbind(tminnewBOTTOM, tminnewTOP)
+
+tminnew$month <- rep(1:12)
+
+# create list of 12 for average months
+tminlistmony2000.2020 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tminlistmony2000.2020[[i]] <- stack(tminnew$filedir[tminnew$month == i])
+}
+# average multiple years over every month
+tminavgmonths2000.2020 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tminavgmonths2000.2020[[i]] <- calc(tminlistmony2000.2020[[i]], fun = mean)
+}
+
+tminavgmonths2000.2020 <- stack(tminavgmonths2000.2020)
+tminavgmonths2000.2020 <-  projectRaster(tminavgmonths2000.2020, crs = crs)
+tminavgmonths2000.2020 <- crop(tminavgmonths2000.2020, extent)
+tminavgmonths2000.2020 <- stack(tminavgmonths2000.2020)
+
+rm(tminlistmony2000.2020)
+rm(tminnew)
+rm(tminnewBOTTOM)
+rm(tminnewTOP)
+
+#### tmean ####
+tmeannew <- list.files(path = "./weather/y2000.2020/tmean",
+           pattern = "*_bil$",
+           full.names = T)
+tmeannew <- as.data.frame(tmeannew)
+names(tmeannew) <- "folder"
+tmeannew$file <- list.files(path = "./weather/y2000.2020/tmean",
+           pattern = "*_bil$",
+           full.names = F)
+tmeannew$filedir <- paste(tmeannew$folder, tmeannew$file, sep = "/")
+tmeannew$filedir <- paste0(tmeannew$filedir, sep = ".bil")
+tmeannewTOP <- tmeannew[1:2, 1:3]
+tmeannewBOTTOM <- tmeannew[3:nrow(tmeannew), 1:3]
+tmeannew <- rbind(tmeannewBOTTOM, tmeannewTOP)
+
+tmeannew$month <- rep(1:12)
+
+# create list of 12 for average months
+tmeanlistmony2000.2020 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tmeanlistmony2000.2020[[i]] <- stack(tmeannew$filedir[tmeannew$month == i])
+}
+# average multiple years over every month
+tmeanavgmonths2000.2020 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tmeanavgmonths2000.2020[[i]] <- calc(tmeanlistmony2000.2020[[i]], fun = mean)
+}
+
+tmeanavgmonths2000.2020 <- stack(tmeanavgmonths2000.2020)
+tmeanavgmonths2000.2020 <-  projectRaster(tmeanavgmonths2000.2020, crs = crs)
+tmeanavgmonths2000.2020 <- crop(tmeanavgmonths2000.2020, extent)
+tmeanavgmonths2000.2020 <- stack(tmeanavgmonths2000.2020)
+
+rm(tmeanlistmony2000.2020)
+rm(tmeannew)
+rm(tmeannewBOTTOM)
+rm(tmeannewTOP)
+
+### tmax ###
+
+tmaxnew <- list.files(path = "./weather/y2000.2020/tmax",
+           pattern = "*_bil$",
+           full.names = T)
+tmaxnew <- as.data.frame(tmaxnew)
+names(tmaxnew) <- "folder"
+tmaxnew$file <- list.files(path = "./weather/y2000.2020/tmax",
+           pattern = "*_bil$",
+           full.names = F)
+tmaxnew$filedir <- paste(tmaxnew$folder, tmaxnew$file, sep = "/")
+tmaxnew$filedir <- paste0(tmaxnew$filedir, sep = ".bil")
+tmaxnewTOP <- tmaxnew[1:2, 1:3]
+tmaxnewBOTTOM <- tmaxnew[3:nrow(tmaxnew), 1:3]
+tmaxnew <- rbind(tmaxnewBOTTOM, tmaxnewTOP)
+
+tmaxnew$month <- rep(1:12)
+
+# create list of 12 for average months
+tmaxlistmony2000.2020 <- vector(mode = "list", length = 12)
+
+# loop to create stacks of months
+for (i in 1:12) {
+  tmaxlistmony2000.2020[[i]] <- stack(tmaxnew$filedir[tmaxnew$month == i])
+}
+# average multiple years over every month
+tmaxavgmonths2000.2020 <- vector(mode = "list", length = 12)
+for (i in 1:12) {
+  tmaxavgmonths2000.2020[[i]] <- calc(tmaxlistmony2000.2020[[i]], fun = mean)
+}
+
+tmaxavgmonths2000.2020 <- stack(tmaxavgmonths2000.2020)
+tmaxavgmonths2000.2020 <-  projectRaster(tmaxavgmonths2000.2020, crs = crs)
+tmaxavgmonths2000.2020 <- crop(tmaxavgmonths2000.2020, extent)
+tmaxavgmonths2000.2020 <- stack(tmaxavgmonths2000.2020)
+
+rm(tmaxlistmony2000.2020)
+rm(tmaxnew)
+rm(tmaxnewBOTTOM)
+rm(tmaxnewTOP)
+```
+
+```{r}
+# LAND CLASS VARIABLES #
+
+#### Get lulc data #### -- 1960
+# in ArcGis Pro I took CONUS Backcasting
+# Logical Math tools -
+# Equal to - Conus = 9 --> evergreen 1, anything else 0
+# Equal to - Conus = 10 --> mixed 1, anything else 0
+# Boolean OR - evergreen, mixed --> mixed OR evergreen 1, anything else 0 
+# this is 
+
+pforest1960 <- raster("./lulc/historical/mixedevergreen1960.tif")
+pforest1960 <- projectRaster(pforest1960, tminavgmonths1935.1985, method = "ngb") # match crs, make 4km x 4km to match climate variables
+pforest1960 <- crop(pforest1960, extent)
+county$pforest1960 <- raster::extract(pforest1960, county, fun = mean, na.rm = T)
+pforest1960.co <- raster()
+pforest1960.co <- rasterize(county, pforest1960, field = county$pforest1960)
+
+#same procedure as above, however I resampled (NBG) to the 250x250m grain
+
+pforest2008 <- raster("./lulc/recent/resampled2008/mixedevergreen2008.tif")
+pforest2008 <- projectRaster(pforest2008, tminavgmonths2000.2020, method = "ngb") # match crs, make 4km x 4km to match climate
+pforest2008 <- crop(pforest2008, extent)
+county$pforest2008 <- raster::extract(pforest2008, county, fun = mean, na.rm = T)
+pforest2008.co <- raster()
+pforest2008.co <- rasterize(county, pforest2008, field = county$pforest2008)
+
+plot(pforest1960.co)
+plot(state, add = T)
+plot(pforest2008.co)
+plot(state, add = T)
+```
+
+```{r}
+#### variables during the active season (as) #### -- average all
+
+prec1935.1985as <- calc(precipavgmonths1935.1985[[4:11]], fun = mean)
+tmin1935.1985as <- calc(tminavgmonths1935.1985[[4:11]], fun = mean)
+tmax1935.1985as <- calc(tmaxavgmonths1935.1985[[4:11]], fun = mean)
+tmean1935.1985as <- calc(tmeanavgmonths1935.1985[[4:11]], fun = mean)
+prec2000.2020as <- calc(precipavgmonths2000.2020[[4:11]], fun = mean)
+tmin2000.2020as <- calc(tminavgmonths2000.2020[[4:11]], fun = mean)
+tmax2000.2020as <- calc(tmaxavgmonths2000.2020[[4:11]], fun = mean)
+tmean2000.2020as <- calc(tmeanavgmonths2000.2020[[4:11]], fun = mean)
+
+#### fluctuations of mean temp (seasonality) ####
+seasonality1935.1985 <- calc(tmeanavgmonths1935.1985, fun = sd)
+seasonality2000.2020 <- calc(tmeanavgmonths2000.2020, fun = sd)
+
+#### fraction of year > 4 deg tmin ####
+tmin1985 <- tminavgmonths1935.1985
+tmin2020 <- tminavgmonths2000.2020
+for (i in 1:nlayers(tmin1985)){
+tmin1985[[i]][values(tmin1985[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin1985)){
+tmin1985[[i]][values(tmin1985[[i]]) > 4] <- 1
+}
+for (i in 1:nlayers(tmin2020)){
+tmin2020[[i]][values(tmin2020[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin2020)){
+tmin2020[[i]][values(tmin2020[[i]]) > 4] <- 1
+}
+
+above4.1985 <- calc(tmin1985, fun = mean)
+above4.2020 <- calc(tmin2020, fun = mean)
+```
+
+```{r}
+# some rasters over water, mask to US boundary
+prec1935.1985as <- mask(prec1935.1985as, us)
+tmin1935.1985as <- mask(tmin1935.1985as, us)
+tmax1935.1985as <- mask(tmax1935.1985as, us)
+tmean1935.1985as <- mask(tmean1935.1985as, us)
+prec2000.2020as <- mask(prec2000.2020as, us)
+tmin2000.2020as <- mask(tmin2000.2020as, us)
+tmax2000.2020as <- mask(tmax2000.2020as, us)
+tmean2000.2020as <- mask(tmean2000.2020as, us)
+pforest1960.co <- mask(pforest1960.co, us)
+pforest2008.co <- mask(pforest2008.co, us)
+seasonality1935.1985 <- mask(seasonality1935.1985, us)
+seasonality2000.2020 <- mask(seasonality2000.2020, us)
+above4.1985 <- mask(above4.1985, us)
+above4.2020 <- mask(above4.2020, us)
+
+# county averages for each variable (.co)
+
+countyvs <- data.frame(nrow = 1:2549)
+countyvs$prec1935.1985as <- extract(prec1935.1985as, county, fun = mean, na.rm = T)
+countyvs$tmax1935.1985as <- extract(tmax1935.1985as, county, fun = mean, na.rm = T)
+countyvs$tmin1935.1985as <- extract(tmin1935.1985as, county, fun = mean, na.rm = T)
+countyvs$tmean1935.1985as <- extract(tmean1935.1985as, county, fun = mean, na.rm = T)
+countyvs$seasonality1935.1985<- extract(seasonality1935.1985, county, fun = mean, na.rm = T)
+countyvs$above4.1985 <- extract(above4.1985, county, fun = mean, na.rm = T)
+countyvs$pforest1960 <- county$pforest1960
+
+prec1935.1985as.co <- rasterize(county, prec1935.1985as, field = countyvs$prec1935.1985as)
+tmax1935.1985as.co <- rasterize(county, tmax1935.1985as, field = countyvs$tmax1935.1985as)
+tmin1935.1985as.co <- rasterize(county, tmin1935.1985as, field = countyvs$tmin1935.1985as)
+tmean1935.1985as.co <- rasterize(county, tmean1935.1985as, field = countyvs$tmean1935.1985as)
+above4.1985.co <- rasterize(county, above4.1985, field = countyvs$above4.1985)
+seasonality1935.1985.co <- rasterize(county, seasonality1935.1985, field = countyvs$seasonality1935.1985)
+
+countyvs$prec2000.2020as <- extract(prec2000.2020as, county, fun = mean, na.rm = T)
+countyvs$tmax2000.2020as <- extract(tmax2000.2020as, county, fun = mean, na.rm = T)
+countyvs$tmin2000.2020as <- extract(tmin2000.2020as, county, fun = mean, na.rm = T)
+countyvs$tmean2000.2020as <- extract(tmean2000.2020as, county, fun = mean, na.rm = T)
+countyvs$seasonality2000.2020<- extract(seasonality2000.2020, county, fun = mean, na.rm = T)
+countyvs$above4.2020 <- extract(above4.2020, county, fun = mean, na.rm = T)
+
+prec2000.2020as.co <- rasterize(county, prec2000.2020as, field = countyvs$prec2000.2020as)
+tmax2000.2020as.co <- rasterize(county, tmax2000.2020as, field = countyvs$tmax2000.2020as)
+tmin2000.2020as.co <- rasterize(county, tmin2000.2020as, field = countyvs$tmin2000.2020as)
+tmean2000.2020as.co <- rasterize(county, tmean2000.2020as, field = countyvs$tmean2000.2020as)
+above4.2020.co <- rasterize(county, above4.2020, field = countyvs$above4.2020)
+seasonality2000.2020.co <- rasterize(county, seasonality2000.2020, field = countyvs$seasonality2000.2020)
+
+
+# final check to see if they make sense
+plot(prec1935.1985as.co)
+plot(tmin1935.1985as.co)
+plot(tmax1935.1985as.co)
+plot(tmean1935.1985as.co)
+plot(prec2000.2020as.co)
+plot(tmin2000.2020as.co)
+plot(tmax2000.2020as.co)
+plot(tmean2000.2020as.co)
+plot(pforest1960.co)
+plot(pforest2008.co)
+plot(seasonality1935.1985.co)
+plot(seasonality2000.2020.co)
+plot(above4.1985.co)
+plot(above4.2020.co)
+
+```
+
+```{r}
+# write all rasters for analysis (historical and recent)
+writeRaster(prec1935.1985as.co, "./predictors/p1985/prec.asc", format = "ascii", overwrite = T)
+writeRaster(tmin1935.1985as.co, "./predictors/p1985/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(pforest1960.co, "./predictors/p1985/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality1935.1985.co, "./predictors/p1985/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(above4.1985.co, "./predictors/p1985/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(tmax1935.1985as.co, "./predictors/p1985/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean1935.1985as.co, "./predictors/p1985/tmean.asc", format = "ascii", overwrite = T)
+
+writeRaster(prec2000.2020as.co, "./predictors/p2020/prec.asc", format = "ascii", overwrite = T)
+writeRaster(tmin2000.2020as.co, "./predictors/p2020/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2008.co, "./predictors/p2020/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality2000.2020.co, "./predictors/p2020/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(above4.2020.co, "./predictors/p2020/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(tmax2000.2020as.co, "./predictors/p2020/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean2000.2020as.co, "./predictors/p2020/tmean.asc", format = "ascii", overwrite = T)
+```
+
+```{r}
+# FUTURE # -- manually downloaded from worldclim, all groups GCMs are in single folder per time period and ssp
+# so we had to make 12 rasters total (which averaged all the groups GCMs for each month in the time period and SSP)
+
+### 2021.2040 ###
+# ssp 2 -- 4.5 #
+
+# prec #
+list <- vector(mode = "list", length = 12)
+prec <- stack(list.files("./weather/y2021.2040/prec/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T))
+prec <- projectRaster(prec, precipavgmonths1935.1985)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+} # loop to make subsets of each month (all GCMs combined)
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean) # average them
+}
+prec2_4.5_2021.2040 <- stack(list2)
+prec2_4.5_2021.2040 <- mask(prec2_4.5_2021.2040, us)
+
+# tmin #
+list <- vector(mode = "list", length = 12)
+tmin <- stack(list.files("./weather/y2021.2040/tmin/ssp2-4.5", full.names = T))
+tmin <- projectRaster(tmin, precipavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin2_4.5_2021.2040 <- stack(list2)
+tmin2_4.5_2021.2040 <- mask(tmin2_4.5_2021.2040, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2021.2040/tmax/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax2_4.5_2021.2040 <- stack(list2)
+tmax2_4.5_2021.2040 <- mask(tmax2_4.5_2021.2040, us)
+
+# ssp 3 -- 7.0 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2021.2040/prec/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec3_7.0_2021.2040 <- stack(list2)
+prec3_7.0_2021.2040 <- mask(prec3_7.0_2021.2040, us)
+
+# tmin # n = 9
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2021.2040/tmin/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin3_7.0_2021.2040 <- stack(list2)
+tmin3_7.0_2021.2040 <- mask(tmin3_7.0_2021.2040, us)
+
+# tmax # n = 9
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2021.2040/tmax/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax3_7.0_2021.2040 <- stack(list2)
+tmax3_7.0_2021.2040 <- mask(tmax3_7.0_2021.2040, us)
+
+# ssp 5 -- 8.5 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2021.2040/prec/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec5_8.5_2021.2040 <- stack(list2)
+prec5_8.5_2021.2040 <- mask(prec5_8.5_2021.2040, us)
+
+# tmin # n = 8
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2021.2040/tmin/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin5_8.5_2021.2040 <- stack(list2)
+tmin5_8.5_2021.2040 <- mask(tmin5_8.5_2021.2040, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax1 <- list.files("./weather/y2021.2040/tmax/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i ))#, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax5_8.5_2021.2040 <- stack(list2)
+tmax5_8.5_2021.2040 <- mask(tmax5_8.5_2021.2040, us)
+
+
+### 2041-2060
+# ssp 2 -- 4.5 #
+# prec #
+list <- vector(mode = "list", length = 12)
+prec <- stack(list.files("./weather/y2041.2060/prec/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T))
+prec <- projectRaster(prec, precipavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec2_4.5_2041.2060 <- stack(list2)
+prec2_4.5_2041.2060 <- mask(prec2_4.5_2041.2060, us)
+
+# tmin #
+list <- vector(mode = "list", length = 12)
+tmin <- stack(list.files("./weather/y2041.2060/tmin/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T))
+tmin <- projectRaster(tmin, precipavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin2_4.5_2041.2060 <- stack(list2)
+tmin2_4.5_2041.2060 <- mask(tmin2_4.5_2041.2060, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2041.2060/tmax/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax2_4.5_2041.2060 <- stack(list2)
+tmax2_4.5_2041.2060 <- mask(tmax2_4.5_2041.2060, us)
+
+# ssp 3 -- 7.0 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2041.2060/prec/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec3_7.0_2041.2060 <- stack(list2)
+prec3_7.0_2041.2060 <- mask(prec3_7.0_2041.2060, us)
+
+# tmin # n = 9
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2041.2060/tmin/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin3_7.0_2041.2060 <- stack(list2)
+tmin3_7.0_2041.2060 <- mask(tmin3_7.0_2041.2060, us)
+
+# tmax # n = 9
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2041.2060/tmax/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax3_7.0_2041.2060 <- stack(list2)
+tmax3_7.0_2041.2060 <- mask(tmax3_7.0_2041.2060, us)
+
+# ssp 5 -- 8.5 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2041.2060/prec/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec5_8.5_2041.2060 <- stack(list2)
+prec5_8.5_2041.2060 <- mask(prec5_8.5_2041.2060, us)
+
+# tmin # n = 8
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2041.2060/tmin/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin5_8.5_2041.2060 <- stack(list2)
+tmin5_8.5_2041.2060 <- mask(tmin5_8.5_2041.2060, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax1 <- list.files("./weather/y2041.2060/tmax/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i ))#, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax5_8.5_2041.2060 <- stack(list2)
+tmax5_8.5_2041.2060 <- mask(tmax5_8.5_2041.2060, us)
+
+### 2061-2080
+# ssp 2 -- 4.5 #
+# prec #
+list <- vector(mode = "list", length = 12)
+prec <- stack(list.files("./weather/y2061.2080/prec/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T))
+prec <- projectRaster(prec, precipavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec2_4.5_2061.2080 <- stack(list2)
+prec2_4.5_2061.2080 <- mask(prec2_4.5_2061.2080, us)
+
+# tmin #
+list <- vector(mode = "list", length = 12)
+tmin <- stack(list.files("./weather/y2061.2080/tmin/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T))
+tmin <- projectRaster(tmin, precipavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin2_4.5_2061.2080 <- stack(list2)
+tmin2_4.5_2061.2080 <- mask(tmin2_4.5_2061.2080, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2061.2080/tmax/ssp2-4.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax2_4.5_2061.2080 <- stack(list2)
+tmax2_4.5_2061.2080 <- mask(tmax2_4.5_2061.2080, us)
+
+# ssp 3 -- 7.0 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2061.2080/prec/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec3_7.0_2061.2080 <- stack(list2)
+prec3_7.0_2061.2080 <- mask(prec3_7.0_2061.2080, us)
+
+# tmin # n = 9
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2061.2080/tmin/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin3_7.0_2061.2080 <- stack(list2)
+tmin3_7.0_2061.2080 <- mask(tmin3_7.0_2061.2080, us)
+
+# tmax # n = 9
+list <- vector(mode = "list", length = 12)
+tmax <- list.files("./weather/y2061.2080/tmax/ssp3-7.0", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax3_7.0_2061.2080 <- stack(list2)
+tmax3_7.0_2061.2080 <- mask(tmax3_7.0_2061.2080, us)
+
+# ssp 5 -- 8.5 #
+# prec # n = 9
+list <- vector(mode = "list", length = 12)
+prec <- list.files("./weather/y2061.2080/prec/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+prec <- stack(prec)
+prec <- projectRaster(prec, tmaxavgmonths1935.1985)
+prec <- crop(prec, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(prec, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i, 8*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+prec5_8.5_2061.2080 <- stack(list2)
+prec5_8.5_2061.2080 <- mask(prec5_8.5_2061.2080, us)
+
+# tmin # n = 8
+list <- vector(mode = "list", length = 12)
+tmin <- list.files("./weather/y2061.2080/tmin/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmin <- stack(tmin)
+tmin <- projectRaster(tmin, tmaxavgmonths1935.1985)
+tmin <- crop(tmin, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmin, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmin5_8.5_2061.2080 <- stack(list2)
+tmin5_8.5_2061.2080 <- mask(tmin5_8.5_2061.2080, us)
+
+# tmax # n = 8
+list <- vector(mode = "list", length = 12)
+tmax1 <- list.files("./weather/y2061.2080/tmax/ssp5-8.5", full.names = T, pattern = "*.tif", recursive = T)
+tmax <- stack(tmax)
+tmax <- projectRaster(tmax, tmaxavgmonths1935.1985)
+tmax <- crop(tmax, extent)
+for (i in 1:length(list)){
+  list[i] <- subset(tmax, c(i, 12+i, 2*12+i, 3*12+i, 4*12+i, 5*12+i, 6*12+i ))#, 7*12+i))
+}
+list2 <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list2[i] <- calc(stack(list[i]), fun = mean)
+}
+tmax5_8.5_2061.2080 <- stack(list2)
+tmax5_8.5_2061.2080 <- mask(tmax5_8.5_2061.2080, us)
+```
+
+```{r}
+# Now we have 12 rasters per ssp/time period (each month averaged over each year in the time period for all groups GCMs)
+# now we need to create averages over the active season (april to november)
+
+# prec - active season
+prec2_4.5_2021.2040as <- subset(prec2_4.5_2021.2040, c(4:11))
+prec2_4.5_2021.2040as <- calc(prec2_4.5_2021.2040as, fun = mean)
+prec3_7.0_2021.2040as <- subset(prec3_7.0_2021.2040, c(4:11))
+prec3_7.0_2021.2040as <- calc(prec3_7.0_2021.2040as, fun = mean)
+prec5_8.5_2021.2040as <- subset(prec5_8.5_2021.2040, c(4:11))
+prec5_8.5_2021.2040as <- calc(prec5_8.5_2021.2040as, fun = mean)
+prec2_4.5_2041.2060as <- subset(prec2_4.5_2041.2060, c(4:11))
+prec2_4.5_2041.2060as <- calc(prec2_4.5_2041.2060as, fun = mean)
+prec3_7.0_2041.2060as <- subset(prec3_7.0_2041.2060, c(4:11))
+prec3_7.0_2041.2060as <- calc(prec3_7.0_2041.2060as, fun = mean)
+prec5_8.5_2041.2060as <- subset(prec5_8.5_2041.2060, c(4:11))
+prec5_8.5_2041.2060as <- calc(prec5_8.5_2041.2060as, fun = mean)
+prec2_4.5_2061.2080as <- subset(prec2_4.5_2061.2080, c(4:11))
+prec2_4.5_2061.2080as <- calc(prec2_4.5_2061.2080as, fun = mean)
+prec3_7.0_2061.2080as <- subset(prec3_7.0_2061.2080, c(4:11))
+prec3_7.0_2061.2080as <- calc(prec3_7.0_2061.2080as, fun = mean)
+prec5_8.5_2061.2080as <- subset(prec5_8.5_2061.2080, c(4:11))
+prec5_8.5_2061.2080as <- calc(prec5_8.5_2061.2080as, fun = mean)
+
+# tmin - active season
+tmin2_4.5_2021.2040as <- subset(tmin2_4.5_2021.2040, c(4:11))
+tmin2_4.5_2021.2040as <- calc(tmin2_4.5_2021.2040as, fun = mean)
+tmin3_7.0_2021.2040as <- subset(tmin3_7.0_2021.2040, c(4:11))
+tmin3_7.0_2021.2040as <- calc(tmin3_7.0_2021.2040as, fun = mean)
+tmin5_8.5_2021.2040as <- subset(tmin5_8.5_2021.2040, c(4:11))
+tmin5_8.5_2021.2040as <- calc(tmin5_8.5_2021.2040as, fun = mean)
+tmin2_4.5_2041.2060as <- subset(tmin2_4.5_2041.2060, c(4:11))
+tmin2_4.5_2041.2060as <- calc(tmin2_4.5_2041.2060as, fun = mean)
+tmin3_7.0_2041.2060as <- subset(tmin3_7.0_2041.2060, c(4:11))
+tmin3_7.0_2041.2060as <- calc(tmin3_7.0_2041.2060as, fun = mean)
+tmin5_8.5_2041.2060as <- subset(tmin5_8.5_2041.2060, c(4:11))
+tmin5_8.5_2041.2060as <- calc(tmin5_8.5_2041.2060as, fun = mean)
+tmin2_4.5_2061.2080as <- subset(tmin2_4.5_2061.2080, c(4:11))
+tmin2_4.5_2061.2080as <- calc(tmin2_4.5_2061.2080as, fun = mean)
+tmin3_7.0_2061.2080as <- subset(tmin3_7.0_2061.2080, c(4:11))
+tmin3_7.0_2061.2080as <- calc(tmin3_7.0_2061.2080as, fun = mean)
+tmin5_8.5_2061.2080as <- subset(tmin5_8.5_2061.2080, c(4:11))
+tmin5_8.5_2061.2080as <- calc(tmin5_8.5_2061.2080as, fun = mean)
+
+#tmax - active season
+tmax2_4.5_2021.2040as <- subset(tmax2_4.5_2021.2040, c(4:11))
+tmax2_4.5_2021.2040as <- calc(tmax2_4.5_2021.2040as, fun = mean)
+tmax3_7.0_2021.2040as <- subset(tmax3_7.0_2021.2040, c(4:11))
+tmax3_7.0_2021.2040as <- calc(tmax3_7.0_2021.2040as, fun = mean)
+tmax5_8.5_2021.2040as <- subset(tmax5_8.5_2021.2040, c(4:11))
+tmax5_8.5_2021.2040as <- calc(tmax5_8.5_2021.2040as, fun = mean)
+tmax2_4.5_2041.2060as <- subset(tmax2_4.5_2041.2060, c(4:11))
+tmax2_4.5_2041.2060as <- calc(tmax2_4.5_2041.2060as, fun = mean)
+tmax3_7.0_2041.2060as <- subset(tmax3_7.0_2041.2060, c(4:11))
+tmax3_7.0_2041.2060as <- calc(tmax3_7.0_2041.2060as, fun = mean)
+tmax5_8.5_2041.2060as <- subset(tmax5_8.5_2041.2060, c(4:11))
+tmax5_8.5_2041.2060as <- calc(tmax5_8.5_2041.2060as, fun = mean)
+tmax2_4.5_2061.2080as <- subset(tmax2_4.5_2061.2080, c(4:11))
+tmax2_4.5_2061.2080as <- calc(tmax2_4.5_2061.2080as, fun = mean)
+tmax3_7.0_2061.2080as <- subset(tmax3_7.0_2061.2080, c(4:11))
+tmax3_7.0_2061.2080as <- calc(tmax3_7.0_2061.2080as, fun = mean)
+tmax5_8.5_2061.2080as <- subset(tmax5_8.5_2061.2080, c(4:11))
+tmax5_8.5_2061.2080as <- calc(tmax5_8.5_2061.2080as, fun = mean)
+
+#tmean - avg for each month btween tmin and tmax (this is actually how PRISM does tmean (go figure))
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2021.2040, i), subset(tmax2_4.5_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean2_4.5_2021.2040as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2021.2040, i), subset(tmax3_7.0_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean3_7.0_2021.2040as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2021.2040, i), subset(tmax5_8.5_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean5_8.5_2021.2040as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2041.2060, i), subset(tmax2_4.5_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean2_4.5_2041.2060as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2041.2060, i), subset(tmax3_7.0_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean3_7.0_2041.2060as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2041.2060, i), subset(tmax5_8.5_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean5_8.5_2041.2060as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2061.2080, i), subset(tmax2_4.5_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean2_4.5_2061.2080as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2061.2080, i), subset(tmax3_7.0_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean3_7.0_2061.2080as <- calc(list, fun = mean)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2061.2080, i), subset(tmax5_8.5_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+list <- raster::subset(list, c(4:11))
+tmean5_8.5_2061.2080as <- calc(list, fun = mean)
+
+# above 4 deg C
+tmin <- tmin2_4.5_2021.2040
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.2_4.5_2021.2040 <- calc(tmin, fun = mean)
+
+tmin <- tmin3_7.0_2021.2040
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.3_7.0_2021.2040 <- calc(tmin, fun = mean)
+
+tmin <- tmin5_8.5_2021.2040
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.5_8.5_2021.2040 <- calc(tmin, fun = mean)
+
+tmin <- tmin2_4.5_2041.2060
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.2_4.5_2041.2060 <- calc(tmin, fun = mean)
+
+tmin <- tmin3_7.0_2041.2060
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.3_7.0_2041.2060 <- calc(tmin, fun = mean)
+
+tmin <- tmin5_8.5_2041.2060
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.5_8.5_2041.2060 <- calc(tmin, fun = mean)
+
+tmin <- tmin2_4.5_2061.2080
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.2_4.5_2061.2080 <- calc(tmin, fun = mean)
+
+tmin <- tmin3_7.0_2061.2080
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.3_7.0_2061.2080 <- calc(tmin, fun = mean)
+
+tmin <- tmin5_8.5_2061.2080
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) <= 4] <- 0
+}
+for (i in 1:nlayers(tmin)){
+tmin[[i]][values(tmin[[i]]) > 4] <- 1
+}
+above4.5_8.5_2061.2080 <- calc(tmin, fun = mean)
+
+### tmean - standard deviation ### seasonality
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2021.2040, i), subset(tmax2_4.5_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+seasonality2_4.5_2021.2040 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2021.2040, i), subset(tmax3_7.0_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+seasonality3_7.0_2021.2040 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2021.2040, i), subset(tmax5_8.5_2021.2040, i)), fun = mean)
+}
+list <- stack(list)
+seasonality5_8.5_2021.2040 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2041.2060, i), subset(tmax2_4.5_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+seasonality2_4.5_2041.2060 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2041.2060, i), subset(tmax3_7.0_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+seasonality3_7.0_2041.2060 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2041.2060, i), subset(tmax5_8.5_2041.2060, i)), fun = mean)
+}
+list <- stack(list)
+seasonality5_8.5_2041.2060 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin2_4.5_2061.2080, i), subset(tmax2_4.5_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+seasonality2_4.5_2061.2080 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin3_7.0_2061.2080, i), subset(tmax3_7.0_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+seasonality3_7.0_2061.2080 <- calc(list, fun = sd)
+
+list <- vector(mode = "list", length = 12)
+for (i in 1:length(list)){
+  list[[i]] <- calc(stack(subset(tmin5_8.5_2061.2080, i), subset(tmax5_8.5_2061.2080, i)), fun = mean)
+}
+list <- stack(list)
+seasonality5_8.5_2061.2080 <- calc(list, fun = sd)
+```
+
+```{r}
+# future landcover years 2030, 2050, 2050
+# so ssp5 is most similar to A2
+# ssp3 most similar to B2
+# ssp2 most similar to B1
+# evergreen == 9, mixed == 10 categorital variables
+
+pforest2030b1 <- raster("./lulc/future/CONUS_Landcover_B1/CONUS_B1_y2030.tif")
+pforest2030b2 <- raster("./lulc/future/CONUS_Landcover_B2/CONUS_B2_y2030.tif")
+pforest2030a2 <- raster("./lulc/future/CONUS_Landcover_A2/CONUS_A2_y2030.tif")
+pforest2050b1 <- raster("./lulc/future/CONUS_Landcover_B1/CONUS_B1_y2050.tif")
+pforest2050b2 <- raster("./lulc/future/CONUS_Landcover_B2/CONUS_B2_y2050.tif")
+pforest2050a2 <- raster("./lulc/future/CONUS_Landcover_A2/CONUS_A2_y2050.tif")
+pforest2070b1 <- raster("./lulc/future/CONUS_Landcover_B1/CONUS_B1_y2070.tif")
+pforest2070b2 <- raster("./lulc/future/CONUS_Landcover_B2/CONUS_B2_y2070.tif")
+pforest2070a2 <- raster("./lulc/future/CONUS_Landcover_A2/CONUS_A2_y2070.tif")
+
+#make binary
+values(pforest2030a2)[values(pforest2030a2) != 9 & values(pforest2030a2) != 10] <- 0
+values(pforest2030a2)[values(pforest2030a2) == 9 | values(pforest2030a2) == 10] <- 1
+values(pforest2030b2)[values(pforest2030b2) != 9 & values(pforest2030b2) != 10] <- 0
+values(pforest2030b2)[values(pforest2030b2) == 9 | values(pforest2030b2) == 10] <- 1
+values(pforest2030b1)[values(pforest2030b1) != 9 & values(pforest2030b1) != 10] <- 0
+values(pforest2030b1)[values(pforest2030b1) == 9 | values(pforest2030b1) == 10] <- 1
+values(pforest2050a2)[values(pforest2050a2) != 9 & values(pforest2050a2) != 10] <- 0
+values(pforest2050a2)[values(pforest2050a2) == 9 | values(pforest2050a2) == 10] <- 1
+values(pforest2050b2)[values(pforest2050b2) != 9 & values(pforest2050b2) != 10] <- 0
+values(pforest2050b2)[values(pforest2050b2) == 9 | values(pforest2050b2) == 10] <- 1
+values(pforest2050b1)[values(pforest2050b1) != 9 & values(pforest2050b1) != 10] <- 0
+values(pforest2050b1)[values(pforest2050b1) == 9 | values(pforest2050b1) == 10] <- 1
+values(pforest2070a2)[values(pforest2070a2) != 9 & values(pforest2070a2) != 10] <- 0
+values(pforest2070a2)[values(pforest2070a2) == 9 | values(pforest2070a2) == 10] <- 1
+values(pforest2070b2)[values(pforest2070b2) != 9 & values(pforest2070b2) != 10] <- 0
+values(pforest2070b2)[values(pforest2070b2) == 9 | values(pforest2070b2) == 10] <- 1
+values(pforest2070b1)[values(pforest2070b1) != 9 & values(pforest2070b1) != 10] <- 0
+values(pforest2070b1)[values(pforest2070b1) == 9 | values(pforest2070b1) == 10] <- 1
+
+# project into correct extent and crs
+pforest2030a2 <- projectRaster(pforest2030a2, tminavgmonths1935.1985, method = "ngb")
+pforest2030b2 <- projectRaster(pforest2030b2, tminavgmonths1935.1985, method = "ngb")
+pforest2030b1 <- projectRaster(pforest2030b1, tminavgmonths1935.1985, method = "ngb")
+pforest2050a2 <- projectRaster(pforest2050a2, tminavgmonths1935.1985, method = "ngb")
+pforest2050b2 <- projectRaster(pforest2050b2, tminavgmonths1935.1985, method = "ngb")
+pforest2050b1 <- projectRaster(pforest2050b1, tminavgmonths1935.1985, method = "ngb")
+pforest2070a2 <- projectRaster(pforest2070a2, tminavgmonths1935.1985, method = "ngb")
+pforest2070b2 <- projectRaster(pforest2070b2, tminavgmonths1935.1985, method = "ngb")
+pforest2070b1 <- projectRaster(pforest2070b1, tminavgmonths1935.1985, method = "ngb")
+
+# extract county avgs - percent county coverage
+countyvs$pforest2030a2 <- raster::extract(pforest2030a2, county, fun = mean, na.rm = T)
+countyvs$pforest2030b1 <- raster::extract(pforest2030b1, county, fun = mean, na.rm = T)
+countyvs$pforest2030b2 <- raster::extract(pforest2030b2, county, fun = mean, na.rm = T)
+countyvs$pforest2050a2 <- raster::extract(pforest2050a2, county, fun = mean, na.rm = T)
+countyvs$pforest2050b2 <- raster::extract(pforest2050b2, county, fun = mean, na.rm = T)
+countyvs$pforest2050b1 <- raster::extract(pforest2050b1, county, fun = mean, na.rm = T)
+countyvs$pforest2070a2 <- raster::extract(pforest2070a2, county, fun = mean, na.rm = T)
+countyvs$pforest2070b2 <- raster::extract(pforest2070b2, county, fun = mean, na.rm = T)
+countyvs$pforest2070b1 <- raster::extract(pforest2070b1, county, fun = mean, na.rm = T)
+
+# make rasters for model outputs
+pforest2030a2.co <- raster()
+pforest2030a2.co <- rasterize(county, pforest2030a2, field = countyvs$pforest2030a2)
+pforest2030b1.co <- raster()
+pforest2030b1.co <- rasterize(county, pforest2030b1, field = countyvs$pforest2030b1)
+pforest2030b2.co <- raster()
+pforest2030b2.co <- rasterize(county, pforest2030b2, field = countyvs$pforest2030b2)
+pforest2050a2.co <- raster()
+pforest2050a2.co <- rasterize(county, pforest2050a2, field = countyvs$pforest2050a2)
+pforest2050b2.co <- raster()
+pforest2050b2.co <- rasterize(county, pforest2050b2, field = countyvs$pforest2050b2)
+pforest2050b1.co <- raster()
+pforest2050b1.co <- rasterize(county, pforest2050b1, field = countyvs$pforest2050b1)
+pforest2070a2.co <- raster()
+pforest2070a2.co <- rasterize(county, pforest2070a2, field = countyvs$pforest2070a2)
+pforest2070b2.co <- raster()
+pforest2070b2.co <- rasterize(county, pforest2070b2, field = countyvs$pforest2070b2)
+pforest2070b1.co <- raster()
+pforest2070b1.co <- rasterize(county, pforest2070b1, field = countyvs$pforest2070b1)
+```
+
+```{r}
+# extracting county averaged values from objects
+# 2040
+prec2_4.5_2021.2040as.co <- raster::extract(prec2_4.5_2021.2040as, county, fun = mean, na.rm = T)
+tmin2_4.5_2021.2040as.co <- raster::extract(tmin2_4.5_2021.2040as, county, fun = mean, na.rm = T)
+above4.2_4.5_2021.2040.co <- raster::extract(above4.2_4.5_2021.2040, county, fun = mean, na.rm = T)
+seasonality2_4.5_2021.2040.co <- raster::extract(seasonality2_4.5_2021.2040, county, fun = mean, na.rm = T)
+prec3_7.0_2021.2040as.co <- raster::extract(prec3_7.0_2021.2040as, county, fun = mean, na.rm = T)
+tmin3_7.0_2021.2040as.co <- raster::extract(tmin3_7.0_2021.2040as, county, fun = mean, na.rm = T)
+above4.3_7.0_2021.2040.co <- raster::extract(above4.3_7.0_2021.2040, county, fun = mean, na.rm = T)
+seasonality3_7.0_2021.2040.co <- raster::extract(seasonality3_7.0_2021.2040, county, fun = mean, na.rm = T)
+prec5_8.5_2021.2040as.co <- raster::extract(prec5_8.5_2021.2040as, county, fun = mean, na.rm = T)
+tmin5_8.5_2021.2040as.co <- raster::extract(tmin5_8.5_2021.2040as, county, fun = mean, na.rm = T)
+above4.5_8.5_2021.2040.co <- raster::extract(above4.5_8.5_2021.2040, county, fun = mean, na.rm = T)
+seasonality5_8.5_2021.2040.co <- raster::extract(seasonality5_8.5_2021.2040, county, fun = mean, na.rm = T)
+tmean2_4.5_2021.2040as.co <- raster::extract(tmean2_4.5_2021.2040as, county, fun = mean, na.rm = T)
+tmean3_7.0_2021.2040as.co <- raster::extract(tmean3_7.0_2021.2040as, county, fun = mean, na.rm = T)
+tmean5_8.5_2021.2040as.co <- raster::extract(tmean5_8.5_2021.2040as, county, fun = mean, na.rm = T)
+tmax2_4.5_2021.2040as.co <- raster::extract(tmax2_4.5_2021.2040as, county, fun = mean, na.rm = T)
+tmax3_7.0_2021.2040as.co <- raster::extract(tmax3_7.0_2021.2040as, county, fun = mean, na.rm = T)
+tmax5_8.5_2021.2040as.co <- raster::extract(tmax5_8.5_2021.2040as, county, fun = mean, na.rm = T)
+
+# 2060
+prec2_4.5_2041.2060as.co <- raster::extract(prec2_4.5_2041.2060as, county, fun = mean, na.rm = T)
+tmin2_4.5_2041.2060as.co <- raster::extract(tmin2_4.5_2041.2060as, county, fun = mean, na.rm = T)
+above4.2_4.5_2041.2060.co <- raster::extract(above4.2_4.5_2041.2060, county, fun = mean, na.rm = T)
+seasonality2_4.5_2041.2060.co <- raster::extract(seasonality2_4.5_2041.2060, county, fun = mean, na.rm = T)
+prec3_7.0_2041.2060as.co <- raster::extract(prec3_7.0_2041.2060as, county, fun = mean, na.rm = T)
+tmin3_7.0_2041.2060as.co <- raster::extract(tmin3_7.0_2041.2060as, county, fun = mean, na.rm = T)
+above4.3_7.0_2041.2060.co <- raster::extract(above4.3_7.0_2041.2060, county, fun = mean, na.rm = T)
+seasonality3_7.0_2041.2060.co <- raster::extract(seasonality3_7.0_2041.2060, county, fun = mean, na.rm = T)
+prec5_8.5_2041.2060as.co <- raster::extract(prec5_8.5_2041.2060as, county, fun = mean, na.rm = T)
+tmin5_8.5_2041.2060as.co <- raster::extract(tmin5_8.5_2041.2060as, county, fun = mean, na.rm = T)
+above4.5_8.5_2041.2060.co <- raster::extract(above4.5_8.5_2041.2060, county, fun = mean, na.rm = T)
+seasonality5_8.5_2041.2060.co <- raster::extract(seasonality5_8.5_2041.2060, county, fun = mean, na.rm = T)
+tmean2_4.5_2041.2060as.co <- raster::extract(tmean2_4.5_2041.2060as, county, fun = mean, na.rm = T)
+tmean3_7.0_2041.2060as.co <- raster::extract(tmean3_7.0_2041.2060as, county, fun = mean, na.rm = T)
+tmean5_8.5_2041.2060as.co <- raster::extract(tmean5_8.5_2041.2060as, county, fun = mean, na.rm = T)
+tmax2_4.5_2041.2060as.co <- raster::extract(tmax2_4.5_2041.2060as, county, fun = mean, na.rm = T)
+tmax3_7.0_2041.2060as.co <- raster::extract(tmax3_7.0_2041.2060as, county, fun = mean, na.rm = T)
+tmax5_8.5_2041.2060as.co <- raster::extract(tmax5_8.5_2041.2060as, county, fun = mean, na.rm = T)
+
+# 2080
+prec2_4.5_2061.2080as.co <- raster::extract(prec2_4.5_2061.2080as, county, fun = mean, na.rm = T)
+tmin2_4.5_2061.2080as.co <- raster::extract(tmin2_4.5_2061.2080as, county, fun = mean, na.rm = T)
+above4.2_4.5_2061.2080.co <- raster::extract(above4.2_4.5_2061.2080, county, fun = mean, na.rm = T)
+seasonality2_4.5_2061.2080.co <- raster::extract(seasonality2_4.5_2061.2080, county, fun = mean, na.rm = T)
+prec3_7.0_2061.2080as.co <- raster::extract(prec3_7.0_2061.2080as, county, fun = mean, na.rm = T)
+tmin3_7.0_2061.2080as.co <- raster::extract(tmin3_7.0_2061.2080as, county, fun = mean, na.rm = T)
+above4.3_7.0_2061.2080.co <- raster::extract(above4.3_7.0_2061.2080, county, fun = mean, na.rm = T)
+seasonality3_7.0_2061.2080.co <- raster::extract(seasonality3_7.0_2061.2080, county, fun = mean, na.rm = T)
+prec5_8.5_2061.2080as.co <- raster::extract(prec5_8.5_2061.2080as, county, fun = mean, na.rm = T)
+tmin5_8.5_2061.2080as.co <- raster::extract(tmin5_8.5_2061.2080as, county, fun = mean, na.rm = T)
+above4.5_8.5_2061.2080.co <- raster::extract(above4.5_8.5_2061.2080, county, fun = mean, na.rm = T)
+seasonality5_8.5_2061.2080.co <- raster::extract(seasonality5_8.5_2061.2080, county, fun = mean, na.rm = T)
+tmean2_4.5_2061.2080as.co <- raster::extract(tmean2_4.5_2061.2080as, county, fun = mean, na.rm = T)
+tmean3_7.0_2061.2080as.co <- raster::extract(tmean3_7.0_2061.2080as, county, fun = mean, na.rm = T)
+tmean5_8.5_2061.2080as.co <- raster::extract(tmean5_8.5_2061.2080as, county, fun = mean, na.rm = T)
+tmax2_4.5_2061.2080as.co <- raster::extract(tmax2_4.5_2061.2080as, county, fun = mean, na.rm = T)
+tmax3_7.0_2061.2080as.co <- raster::extract(tmax3_7.0_2061.2080as, county, fun = mean, na.rm = T)
+tmax5_8.5_2061.2080as.co <- raster::extract(tmax5_8.5_2061.2080as, county, fun = mean, na.rm = T)
+
+## rasterize the county values for use in maxent
+# 2040
+prec2_4.5_2021.2040as.co <- rasterize(county, prec2_4.5_2021.2040as, field = prec2_4.5_2021.2040as.co)
+tmin2_4.5_2021.2040as.co <- rasterize(county, tmin2_4.5_2021.2040as, field = tmin2_4.5_2021.2040as.co)
+above4.2_4.5_2021.2040.co <- rasterize(county, above4.2_4.5_2021.2040, field = above4.2_4.5_2021.2040.co)
+seasonality2_4.5_2021.2040.co <- rasterize(county, seasonality2_4.5_2021.2040, field = seasonality2_4.5_2021.2040.co)
+prec3_7.0_2021.2040as.co <- rasterize(county, prec3_7.0_2021.2040as, field = prec3_7.0_2021.2040as.co)
+tmin3_7.0_2021.2040as.co <- rasterize(county, tmin3_7.0_2021.2040as, field = tmin3_7.0_2021.2040as.co)
+above4.3_7.0_2021.2040.co <- rasterize(county, above4.3_7.0_2021.2040, field = above4.3_7.0_2021.2040.co)
+seasonality3_7.0_2021.2040.co <- rasterize(county, seasonality3_7.0_2021.2040, field = seasonality3_7.0_2021.2040.co)
+prec5_8.5_2021.2040as.co <- rasterize(county, prec5_8.5_2021.2040as, field = prec5_8.5_2021.2040as.co)
+tmin5_8.5_2021.2040as.co <- rasterize(county, tmin5_8.5_2021.2040as, field = tmin5_8.5_2021.2040as.co)
+above4.5_8.5_2021.2040.co <- rasterize(county, above4.5_8.5_2021.2040, field = above4.5_8.5_2021.2040.co)
+seasonality5_8.5_2021.2040.co <- rasterize(county, seasonality5_8.5_2021.2040, field = seasonality5_8.5_2021.2040.co)
+tmean2_4.5_2021.2040as.co <- rasterize(county, tmean2_4.5_2021.2040as, field = tmean2_4.5_2021.2040as.co)
+tmean3_7.0_2021.2040as.co <- rasterize(county, tmean3_7.0_2021.2040as, field = tmean3_7.0_2021.2040as.co)
+tmean5_8.5_2021.2040as.co <- rasterize(county, tmean5_8.5_2021.2040as, field = tmean5_8.5_2021.2040as.co)
+tmax2_4.5_2021.2040as.co <- rasterize(county, tmax2_4.5_2021.2040as, field = tmax2_4.5_2021.2040as.co)
+tmax3_7.0_2021.2040as.co <- rasterize(county, tmax3_7.0_2021.2040as, field = tmax3_7.0_2021.2040as.co)
+tmax5_8.5_2021.2040as.co <- rasterize(county, tmax5_8.5_2021.2040as, field = tmax5_8.5_2021.2040as.co)
+
+#2060
+prec2_4.5_2041.2060as.co <- rasterize(county, prec2_4.5_2041.2060as, field = prec2_4.5_2041.2060as.co)
+tmin2_4.5_2041.2060as.co <- rasterize(county, tmin2_4.5_2041.2060as, field = tmin2_4.5_2041.2060as.co)
+above4.2_4.5_2041.2060.co <- rasterize(county, above4.2_4.5_2041.2060, field = above4.2_4.5_2041.2060.co)
+seasonality2_4.5_2041.2060.co <- rasterize(county, seasonality2_4.5_2041.2060, field = seasonality2_4.5_2041.2060.co)
+prec3_7.0_2041.2060as.co <- rasterize(county, prec3_7.0_2041.2060as, field = prec3_7.0_2041.2060as.co)
+tmin3_7.0_2041.2060as.co <- rasterize(county, tmin3_7.0_2041.2060as, field = tmin3_7.0_2041.2060as.co)
+above4.3_7.0_2041.2060.co <- rasterize(county, above4.3_7.0_2041.2060, field = above4.3_7.0_2041.2060.co)
+seasonality3_7.0_2041.2060.co <- rasterize(county, seasonality3_7.0_2041.2060, field = seasonality3_7.0_2041.2060.co)
+prec5_8.5_2041.2060as.co <- rasterize(county, prec5_8.5_2041.2060as, field = prec5_8.5_2041.2060as.co)
+tmin5_8.5_2041.2060as.co <- rasterize(county, tmin5_8.5_2041.2060as, field = tmin5_8.5_2041.2060as.co)
+above4.5_8.5_2041.2060.co <- rasterize(county, above4.5_8.5_2041.2060, field = above4.5_8.5_2041.2060.co)
+seasonality5_8.5_2041.2060.co <- rasterize(county, seasonality5_8.5_2041.2060, field = seasonality5_8.5_2041.2060.co)
+tmean2_4.5_2041.2060as.co <- rasterize(county, tmean2_4.5_2041.2060as, field = tmean2_4.5_2041.2060as.co)
+tmean3_7.0_2041.2060as.co <- rasterize(county, tmean3_7.0_2041.2060as, field = tmean3_7.0_2041.2060as.co)
+tmean5_8.5_2041.2060as.co <- rasterize(county, tmean5_8.5_2041.2060as, field = tmean5_8.5_2041.2060as.co)
+tmax2_4.5_2041.2060as.co <- rasterize(county, tmax2_4.5_2041.2060as, field = tmax2_4.5_2041.2060as.co)
+tmax3_7.0_2041.2060as.co <- rasterize(county, tmax3_7.0_2041.2060as, field = tmax3_7.0_2041.2060as.co)
+tmax5_8.5_2041.2060as.co <- rasterize(county, tmax5_8.5_2041.2060as, field = tmax5_8.5_2041.2060as.co)
+
+#2080
+prec2_4.5_2061.2080as.co <- rasterize(county, prec2_4.5_2061.2080as, field = prec2_4.5_2061.2080as.co)
+tmin2_4.5_2061.2080as.co <- rasterize(county, tmin2_4.5_2061.2080as, field = tmin2_4.5_2061.2080as.co)
+above4.2_4.5_2061.2080.co <- rasterize(county, above4.2_4.5_2061.2080, field = above4.2_4.5_2061.2080.co)
+seasonality2_4.5_2061.2080.co <- rasterize(county, seasonality2_4.5_2061.2080, field = seasonality2_4.5_2061.2080.co)
+prec3_7.0_2061.2080as.co <- rasterize(county, prec3_7.0_2061.2080as, field = prec3_7.0_2061.2080as.co)
+tmin3_7.0_2061.2080as.co <- rasterize(county, tmin3_7.0_2061.2080as, field = tmin3_7.0_2061.2080as.co)
+above4.3_7.0_2061.2080.co <- rasterize(county, above4.3_7.0_2061.2080, field = above4.3_7.0_2061.2080.co)
+seasonality3_7.0_2061.2080.co <- rasterize(county, seasonality3_7.0_2061.2080, field = seasonality3_7.0_2061.2080.co)
+prec5_8.5_2061.2080as.co <- rasterize(county, prec5_8.5_2061.2080as, field = prec5_8.5_2061.2080as.co)
+tmin5_8.5_2061.2080as.co <- rasterize(county, tmin5_8.5_2061.2080as, field = tmin5_8.5_2061.2080as.co)
+above4.5_8.5_2061.2080.co <- rasterize(county, above4.5_8.5_2061.2080, field = above4.5_8.5_2061.2080.co)
+seasonality5_8.5_2061.2080.co <- rasterize(county, seasonality5_8.5_2061.2080, field = seasonality5_8.5_2061.2080.co)
+tmean2_4.5_2061.2080as.co <- rasterize(county, tmean2_4.5_2061.2080as, field = tmean2_4.5_2061.2080as.co)
+tmean3_7.0_2061.2080as.co <- rasterize(county, tmean3_7.0_2061.2080as, field = tmean3_7.0_2061.2080as.co)
+tmean5_8.5_2061.2080as.co <- rasterize(county, tmean5_8.5_2061.2080as, field = tmean5_8.5_2061.2080as.co)
+tmax2_4.5_2061.2080as.co <- rasterize(county, tmax2_4.5_2061.2080as, field = tmax2_4.5_2061.2080as.co)
+tmax3_7.0_2061.2080as.co <- rasterize(county, tmax3_7.0_2061.2080as, field = tmax3_7.0_2061.2080as.co)
+tmax5_8.5_2061.2080as.co <- rasterize(county, tmax5_8.5_2061.2080as, field = tmax5_8.5_2061.2080as.co)
+
+```
+
+```{r}
+#### setting up predictor sets with computed variables ####
+# c("nummonth4", "pforest", "prec", "seasonality","tmin") #
+
+
+## 2021-2040 ##
+# ssp2 - 4.5 #
+writeRaster(above4.2_4.5_2021.2040.co, "./predictors/p2040/ssp2/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2030b1.co, "./predictors/p2040/ssp2/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec2_4.5_2021.2040as.co, "./predictors/p2040/ssp2/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality2_4.5_2021.2040.co, "./predictors/p2040/ssp2/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin2_4.5_2021.2040as.co, "./predictors/p2040/ssp2/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmax2_4.5_2021.2040as.co, "./predictors/p2040/ssp2/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean2_4.5_2021.2040as.co, "./predictors/p2040/ssp2/tmean.asc", format = "ascii", overwrite = T)
+
+# ssp3 - 7.0 #
+writeRaster(above4.3_7.0_2021.2040.co, "./predictors/p2040/ssp3/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2030b2.co, "./predictors/p2040/ssp3/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec3_7.0_2021.2040as.co, "./predictors/p2040/ssp3/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality3_7.0_2021.2040.co, "./predictors/p2040/ssp3/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin3_7.0_2021.2040as.co, "./predictors/p2040/ssp3/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmean3_7.0_2021.2040as.co, "./predictors/p2040/ssp3/tmean.asc", format = "ascii", overwrite = T)
+writeRaster(tmax3_7.0_2021.2040as.co, "./predictors/p2040/ssp3/tmax.asc", format = "ascii", overwrite = T)
+
+# ssp5 - 8.5 #
+writeRaster(above4.5_8.5_2021.2040.co, "./predictors/p2040/ssp5/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2030a2.co, "./predictors/p2040/ssp5/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec5_8.5_2021.2040as.co, "./predictors/p2040/ssp5/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality5_8.5_2021.2040.co, "./predictors/p2040/ssp5/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin5_8.5_2021.2040as.co, "./predictors/p2040/ssp5/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmax5_8.5_2021.2040as.co, "./predictors/p2040/ssp5/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean5_8.5_2021.2040as.co, "./predictors/p2040/ssp5/tmean.asc", format = "ascii", overwrite = T)
+
+## 2041-2060 ##
+# ssp2 - 4.5 #
+writeRaster(above4.2_4.5_2041.2060.co, "./predictors/p2060/ssp2/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2050b1.co, "./predictors/p2060/ssp2/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec2_4.5_2041.2060as.co, "./predictors/p2060/ssp2/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality2_4.5_2041.2060.co, "./predictors/p2060/ssp2/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin2_4.5_2041.2060as.co, "./predictors/p2060/ssp2/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmean2_4.5_2041.2060as.co, "./predictors/p2060/ssp2/tmean.asc", format = "ascii", overwrite = T)
+writeRaster(tmax2_4.5_2041.2060as.co, "./predictors/p2060/ssp2/tmax.asc", format = "ascii", overwrite = T)
+
+
+# ssp3 - 7.0 #
+writeRaster(above4.3_7.0_2041.2060.co, "./predictors/p2060/ssp3/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2050b2.co, "./predictors/p2060/ssp3/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec3_7.0_2041.2060as.co, "./predictors/p2060/ssp3/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality3_7.0_2041.2060.co, "./predictors/p2060/ssp3/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin3_7.0_2041.2060as.co, "./predictors/p2060/ssp3/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmean3_7.0_2041.2060as.co, "./predictors/p2060/ssp3/tmean.asc", format = "ascii", overwrite = T)
+writeRaster(tmax3_7.0_2041.2060as.co, "./predictors/p2060/ssp3/tmax.asc", format = "ascii", overwrite = T)
+
+# ssp5 - 8.5 #
+writeRaster(above4.5_8.5_2041.2060.co, "./predictors/p2060/ssp5/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2050a2.co, "./predictors/p2060/ssp5/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec5_8.5_2041.2060as.co, "./predictors/p2060/ssp5/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality5_8.5_2041.2060.co, "./predictors/p2060/ssp5/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin5_8.5_2041.2060as.co, "./predictors/p2060/ssp5/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmax5_8.5_2041.2060as.co, "./predictors/p2060/ssp5/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean5_8.5_2041.2060as.co, "./predictors/p2060/ssp5/tmean.asc", format = "ascii", overwrite = T)
+
+
+## 2061-2080 ##
+# ssp2 - 4.5 #
+writeRaster(above4.2_4.5_2061.2080.co, "./predictors/p2080/ssp2/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2070b1.co, "./predictors/p2080/ssp2/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec2_4.5_2061.2080as.co, "./predictors/p2080/ssp2/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality2_4.5_2061.2080.co, "./predictors/p2080/ssp2/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin2_4.5_2061.2080as.co, "./predictors/p2080/ssp2/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmean2_4.5_2061.2080as.co, "./predictors/p2080/ssp2/tmean.asc", format = "ascii", overwrite = T)
+writeRaster(tmax2_4.5_2061.2080as.co, "./predictors/p2080/ssp2/tmax.asc", format = "ascii", overwrite = T)
+
+# ssp3 - 7.0 #
+writeRaster(above4.3_7.0_2061.2080.co, "./predictors/p2080/ssp3/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2070b2.co, "./predictors/p2080/ssp3/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec3_7.0_2061.2080as.co, "./predictors/p2080/ssp3/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality3_7.0_2061.2080.co, "./predictors/p2080/ssp3/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin3_7.0_2061.2080as.co, "./predictors/p2080/ssp3/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmax3_7.0_2061.2080as.co, "./predictors/p2080/ssp3/tmax.asc", format = "ascii", overwrite = T)
+writeRaster(tmean3_7.0_2061.2080as.co, "./predictors/p2080/ssp3/tmean.asc", format = "ascii", overwrite = T)
+
+# ssp5 - 8.5 #
+writeRaster(above4.5_8.5_2061.2080.co, "./predictors/p2080/ssp5/nummonth4.asc", format = "ascii", overwrite = T)
+writeRaster(pforest2070a2.co, "./predictors/p2080/ssp5/pforest.asc", format = "ascii", overwrite = T)
+writeRaster(prec5_8.5_2061.2080as.co, "./predictors/p2080/ssp5/prec.asc", format = "ascii", overwrite = T)
+writeRaster(seasonality5_8.5_2061.2080.co, "./predictors/p2080/ssp5/seasonality.asc", format = "ascii", overwrite = T)
+writeRaster(tmin5_8.5_2061.2080as.co, "./predictors/p2080/ssp5/tmin.asc", format = "ascii", overwrite = T)
+writeRaster(tmean5_8.5_2061.2080as.co, "./predictors/p2080/ssp5/tmean.asc", format = "ascii", overwrite = T)
+writeRaster(tmax5_8.5_2061.2080as.co, "./predictors/p2080/ssp5/tmax.asc", format = "ascii", overwrite = T)
+```
